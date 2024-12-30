@@ -3,55 +3,72 @@ Created on 30/12/2024
 
 @author: Aryan
 
-Filename: YOLO_model.py
+Filename: KITTIMultiModal.py
 
-Relative Path: src/train/YOLO_model.py
+Relative Path: src/train/KITTIMultiModal.py
 """
-import torch
-import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-import yaml
+
 import json
-from pathlib import Path
-import numpy as np
-from typing import Dict, Any, Optional, Tuple
-import logging
-from config.config import YOLOConfig
 from PIL import Image
-import torchvision.transforms as transforms
+from torchvision.transforms import Compose, ToTensor, Resize
+from torch.utils.data import Dataset
+import torch
+import torchvision.models as models
+from torch.utils.data import DataLoader
 import wandb
+from pathlib import Path
 from tqdm import tqdm
-import os
+# from src.train.multi import KITTIMultiModalDataset
 
 
-class YOLOModel(nn.Module):
-    def __init__(self, num_classes: int, modalities: list):
-        super(YOLOModel, self).__init__()
-        # Define your model architecture here
-        self.num_classes = num_classes
-        # Example: Simple multi-modal input
-        self.image_branch = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2)
-        )
-        self.calib_branch = nn.Sequential(
-            nn.Linear(9, 16),
-            nn.ReLU()
-        )
-        self.velodyne_branch = nn.Sequential(
-            nn.Linear(3, 16),
-            nn.ReLU()
-        )
-        # Adjust based on your architecture
-        self.fc = nn.Linear(16 * 2 + 16, num_classes)
+class KITTIMultiModalDataset(Dataset):
+    def __init__(self, coco_dir, split, config):
+        self.coco_dir = Path(coco_dir) / split
+        self.config = config
+        self.split = split
+        self.load_annotations()
+        self.transforms = Compose(
+            [Resize((config['image_height'], config['image_width'])), ToTensor()])
 
-    def forward(self, images, calib, velodyne):
-        img_features = self.image_branch(images)
-        img_features = torch.flatten(img_features, start_dim=1)
-        calib_features = self.calib_branch(calib)
-        velodyne_features = self.velodyne_branch(velodyne)
-        combined = torch.cat(
-            [img_features, calib_features, velodyne_features], dim=1)
-        output = self.fc(combined)
-        return output
+    def load_annotations(self):
+        with open(self.coco_dir / f"{self.split}_image.json", "r") as f:
+            self.image_data = json.load(f)
+
+    def __len__(self):
+        return len(self.image_data['images'])
+
+    def __getitem__(self, idx):
+        image_info = self.image_data['images'][idx]
+        image_path = image_info['file_name']
+        image = Image.open(image_path).convert("RGB")
+        width, height = image.size  # Get the image dimensions
+
+        annotations = [ann for ann in self.image_data['annotations']
+                       if ann['image_id'] == image_info['id']]
+
+        valid_annotations = []
+        for ann in annotations:
+            x_min, y_min, box_width, box_height = ann['bbox']
+            x_max = x_min + box_width
+            y_max = y_min + box_height
+
+            # Ensure bounding box is within image dimensions and has positive area
+            if box_width > 0 and box_height > 0 and x_max <= width and y_max <= height:
+                valid_annotations.append(ann)
+            # else:
+                # logger.warning(
+                #     f"Invalid bbox {ann['bbox']} in image {image_path}. Skipping.")
+
+        if not valid_annotations:
+            # Fallback if no valid annotations exist
+            valid_annotations = [{"bbox": [0, 0, 1, 1], "category_id": 0}]
+
+        # Convert to tensors
+        boxes = torch.tensor([ann['bbox']
+                              for ann in valid_annotations], dtype=torch.float32)
+        labels = torch.tensor([ann['category_id']
+                               for ann in valid_annotations], dtype=torch.int64)
+
+        return self.transforms(image), {"boxes": boxes, "labels": labels}
+
+# File: YOLO_model.py (Not required, using torchvision model)

@@ -10,10 +10,9 @@ Relative Path: src/main.py
 
 from pathlib import Path
 from preprocessing.main import KITTIToCOCOConverter
-from src.train.YOLO_trainer import KITTIMultiModalDataset, YOLOTrainer
+from train.YOLO_trainer import YOLOTrainer
 from config.config import Config, YOLOConfig as ConfigYOLOConfig
-# Rename to avoid conflict
-from src.train.YOLO_trainer import YOLOConfig as TrainYOLOConfig
+
 
 
 def main():
@@ -41,12 +40,30 @@ def preprocess_datasets():
 
 def train_model():
     print("\n=== Step 2: Training Model ===")
-    yolo_config = ConfigYOLOConfig()  # Instance of config.config.YOLOConfig
+    # yolo_config = ConfigYOLOConfig()  # Instance of config.config.YOLOConfig
+    # trainer = YOLOTrainer(
+    #     config=yolo_config,  # Pass the YOLOConfig instance
+    #     data_dir=Path(Config.coco_base_path),
+    #     output_dir=Path(Config.output_path)
+    # )
+    # trainer.train()
+    config = {
+        "learning_rate": 0.001,
+        "batch_size": 128,
+        "num_epochs": 1,
+        "image_height": 1242,
+        "image_width": 375,
+        "wandb_project": "YOLO-Training"
+    }
     trainer = YOLOTrainer(
-        config=yolo_config,  # Pass the YOLOConfig instance
+        config=config,
         data_dir=Path(Config.coco_base_path),
-        output_dir=Path(Config.output_path)
+        output_dir=Path(Config.output_path),
+        # batch_size=4,       # Set batch size
+        # num_epochs=1      # Set number of epochs
     )
+
+    # Start training
     trainer.train()
 
 

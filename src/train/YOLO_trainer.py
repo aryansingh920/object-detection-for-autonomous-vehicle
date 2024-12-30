@@ -1,111 +1,121 @@
-"""
-Created on 29/12/2024
-
-@author: Aryan
-
-Filename: train_model.py
-
-Relative Path: src/train/train_model.py
-"""
 import torch
-import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-import yaml
-import json
+from torch.utils.data.dataloader import default_collate
+import torchvision.models as models
+from torchvision.transforms import Compose, ToTensor, Resize
 from pathlib import Path
-import numpy as np
-from typing import Dict, Any, Optional, Tuple
-import logging
-from config.config import YOLOConfig
-from PIL import Image
-import torchvision.transforms as transforms
 import wandb
 from tqdm import tqdm
-import os
-import KITTIMultiModal_Dataset as KITTIMultiModalDataset
-import YOLO_model as YOLOModel
+import logging
+import numpy as np
+from train.YOLO_model import KITTIMultiModalDataset
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+def validate_boxes(boxes, image_size):
+    """
+    Validate and fix bounding boxes.
+    Returns fixed boxes and a boolean indicating if boxes were valid.
+    """
+    if len(boxes) == 0:
+        return boxes, False
+
+    # Convert to numpy for easier manipulation
+    boxes = boxes.numpy()
+
+    # Ensure boxes are within image bounds
+    boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, image_size[0])
+    boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, image_size[1])
+
+    # Convert [x, y, width, height] to [x1, y1, x2, y2]
+    boxes_xyxy = np.zeros_like(boxes)
+    boxes_xyxy[:, 0] = boxes[:, 0]
+    boxes_xyxy[:, 1] = boxes[:, 1]
+    boxes_xyxy[:, 2] = boxes[:, 0] + boxes[:, 2]
+    boxes_xyxy[:, 3] = boxes[:, 1] + boxes[:, 3]
+
+    # Validate boxes
+    valid_boxes = (boxes_xyxy[:, 2] > boxes_xyxy[:, 0]) & (
+        boxes_xyxy[:, 3] > boxes_xyxy[:, 1])
+    boxes = boxes[valid_boxes]
+
+    return torch.from_numpy(boxes).float(), bool(len(boxes))
+
+
+def custom_collate_fn(batch):
+    """
+    Custom collate function with additional validation.
+    """
+    images = []
+    targets = []
+
+    for image, target in batch:
+        # Validate boxes
+        boxes, is_valid = validate_boxes(
+            target['boxes'], (image.shape[2], image.shape[1]))
+        if is_valid:
+            target['boxes'] = boxes
+            images.append(image)
+            targets.append(target)
+
+    if not images:
+        # Return empty batch if no valid examples
+        return None, None
+
+    images = default_collate(images)
+    return images, targets
 
 
 class YOLOTrainer:
-    """YOLO trainer for multi-modal object detection."""
-
-    def __init__(
-        self,
-        config: YOLOConfig,
-        data_dir: Path,
-        output_dir: Path
-    ):
+    def __init__(self, config, data_dir, output_dir):
         self.config = config
         self.data_dir = Path(data_dir)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.setup_logging()
-        self.setup_wandb()
 
-        # Initialize model, optimizer, and loss function
+        # Device selection with error handling
+        self.device = self._setup_device()
+
         self.setup_model()
         self.setup_optimizer()
-        self.setup_loss()
-
-        # Setup data loaders
         self.setup_data_loaders()
+        self.setup_wandb()
 
-    def setup_logging(self):
-        """Set up logging configuration."""
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(self.output_dir / 'training.log'),
-                logging.StreamHandler()
-            ]
-        )
-        self.logger = logging.getLogger(__name__)
-
-    def setup_wandb(self):
-        """Initialize Weights & Biases for experiment tracking."""
-        wandb.init(
-            project=self.config.defaults.get('wandb_project', 'YOLO-Training'),
-            config=self.config.get_config(),
-            save_code=True
-        )
-        self.logger.info("WandB initialized.")
+    def _setup_device(self):
+        if torch.backends.mps.is_available():
+            device = torch.device("mps")
+        elif torch.cuda.is_available():
+            device = torch.device("cuda")
+        else:
+            device = torch.device("cpu")
+        logger.info(f"Using device: {device}")
+        return device
 
     def setup_model(self):
-        """Initialize YOLO model with multi-modal support."""
-        # Placeholder for model initialization
-        # Replace YOLOModel with your actual model class
-        self.model = YOLOModel(
-            num_classes=self.config.defaults['num_classes'],
-            modalities=['image', 'calib', 'velodyne']
-        ).to(self.config.defaults['device'])
-        self.logger.info("Model initialized.")
+        # Use the latest weights
+        self.model = models.detection.fasterrcnn_resnet50_fpn(
+            weights='DEFAULT')
+        self.model.to(self.device)
+        logger.info("Model initialized with Faster R-CNN.")
 
     def setup_optimizer(self):
-        """Set up optimizer and learning rate scheduler."""
-        self.optimizer = torch.optim.Adam(
+        self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
-            lr=self.config.defaults['learning_rate']
+            lr=self.config['learning_rate'],
+            weight_decay=0.01
         )
-        if self.config.defaults.get('scheduler') == 'StepLR':
-            self.scheduler = torch.optim.lr_scheduler.StepLR(
-                self.optimizer,
-                step_size=self.config.defaults.get('step_size', 10),
-                gamma=self.config.defaults.get('gamma', 0.1)
-            )
-        else:
-            self.scheduler = None
-        self.logger.info("Optimizer and scheduler set up.")
-
-    def setup_loss(self):
-        """Set up loss functions for all modalities."""
-        # Placeholder: Use appropriate loss functions for your task
-        self.criterion = nn.CrossEntropyLoss()
-        self.logger.info("Loss function set up.")
+        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            self.optimizer,
+            max_lr=self.config['learning_rate'],
+            epochs=self.config['num_epochs'],
+            steps_per_epoch=len(self.train_loader) if hasattr(
+                self, 'train_loader') else 100
+        )
 
     def setup_data_loaders(self):
-        """Set up data loaders for train and validation sets."""
-        # Create datasets
+        # Initialize datasets
         self.train_dataset = KITTIMultiModalDataset(
             self.data_dir, 'train', self.config
         )
@@ -113,168 +123,132 @@ class YOLOTrainer:
             self.data_dir, 'val', self.config
         )
 
-        # Create data loaders
+        # Create data loaders with validation
         self.train_loader = DataLoader(
             self.train_dataset,
-            batch_size=self.config.defaults['batch_size'],
+            batch_size=self.config['batch_size'],
             shuffle=True,
-            num_workers=self.config.defaults.get('num_workers', 4),
-            pin_memory=True
+            num_workers=4,
+            pin_memory=True,
+            collate_fn=custom_collate_fn,
+            drop_last=True
         )
 
         self.val_loader = DataLoader(
             self.val_dataset,
-            batch_size=self.config.defaults['batch_size'],
+            batch_size=self.config['batch_size'],
             shuffle=False,
-            num_workers=self.config.defaults.get('num_workers', 4),
-            pin_memory=True
+            num_workers=4,
+            pin_memory=True,
+            collate_fn=custom_collate_fn
         )
-        self.logger.info("Data loaders set up.")
 
-    def train_epoch(self) -> float:
-        """Train for one epoch."""
+    def setup_wandb(self):
+        wandb.init(
+            project=self.config['wandb_project'],
+            config=self.config,
+            save_code=True
+        )
+
+    def train_epoch(self):
         self.model.train()
         epoch_loss = 0.0
-        progress_bar = tqdm(self.train_loader, desc='Training', leave=False)
+        valid_batches = 0
 
-        for batch in progress_bar:
-            images = batch['image'].to(self.config.defaults['device'])
-            calib = batch['calib'].to(self.config.defaults['device'])
-            velodyne = batch['velodyne'].to(self.config.defaults['device'])
-            targets = batch['targets'].to(self.config.defaults['device'])
+        for images, targets in tqdm(self.train_loader, desc="Training"):
+            if images is None:
+                continue
 
-            self.optimizer.zero_grad()
+            try:
+                images = [img.to(self.device) for img in images]
+                targets = [{k: v.to(self.device)
+                            for k, v in t.items()} for t in targets]
 
-            # Forward pass
-            outputs = self.model(images, calib, velodyne)
+                self.optimizer.zero_grad()
+                loss_dict = self.model(images, targets)
+                losses = sum(loss for loss in loss_dict.values())
 
-            # Compute loss
-            loss = self.criterion(outputs, targets)
-            loss.backward()
-            self.optimizer.step()
+                losses.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), max_norm=1.0)
+                self.optimizer.step()
+                self.scheduler.step()
 
-            epoch_loss += loss.item()
-            progress_bar.set_postfix({'Loss': loss.item()})
+                epoch_loss += losses.item()
+                valid_batches += 1
 
-        avg_loss = epoch_loss / len(self.train_loader)
-        wandb.log({'Train Loss': avg_loss})
-        return avg_loss
+            except Exception as e:
+                logger.error(f"Error in training batch: {str(e)}")
+                continue
 
-    def validate(self) -> float:
-        """Validate the model."""
+        return epoch_loss / max(1, valid_batches)
+
+    def validate(self):
         self.model.eval()
         val_loss = 0.0
+        valid_batches = 0
+
         with torch.no_grad():
-            progress_bar = tqdm(
-                self.val_loader, desc='Validation', leave=False)
-            for batch in progress_bar:
-                images = batch['image'].to(self.config.defaults['device'])
-                calib = batch['calib'].to(self.config.defaults['device'])
-                velodyne = batch['velodyne'].to(self.config.defaults['device'])
-                targets = batch['targets'].to(self.config.defaults['device'])
+            for images, targets in tqdm(self.val_loader, desc="Validation"):
+                if images is None:
+                    continue
 
-                # Forward pass
-                outputs = self.model(images, calib, velodyne)
+                try:
+                    images = [img.to(self.device) for img in images]
+                    targets = [{k: v.to(self.device)
+                                for k, v in t.items()} for t in targets]
 
-                # Compute loss
-                loss = self.criterion(outputs, targets)
-                val_loss += loss.item()
-                progress_bar.set_postfix({'Val Loss': loss.item()})
+                    loss_dict = self.model(images, targets)
+                    losses = sum(loss for loss in loss_dict.values())
 
-        avg_val_loss = val_loss / len(self.val_loader)
-        wandb.log({'Val Loss': avg_val_loss})
-        return avg_val_loss
+                    val_loss += losses.item()
+                    valid_batches += 1
+
+                except Exception as e:
+                    logger.error(f"Error in validation batch: {str(e)}")
+                    continue
+
+        return val_loss / max(1, valid_batches)
 
     def train(self):
-        """Main training loop."""
-        best_val_loss = float('inf')
-        patience_counter = 0
+        best_val_loss = float("inf")
 
-        for epoch in range(1, self.config.defaults['num_epochs'] + 1):
-            self.logger.info(
-                f"Epoch {epoch}/{self.config.defaults['num_epochs']}"
-            )
+        for epoch in range(self.config['num_epochs']):
+            logger.info(f"Epoch {epoch + 1}/{self.config['num_epochs']}")
+
             train_loss = self.train_epoch()
             val_loss = self.validate()
 
             # Log metrics
-            self.logger.info(
-                f"Epoch {epoch}/{self.config.defaults['num_epochs']}: "
-                f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}"
-            )
             wandb.log({
-                'Epoch': epoch,
-                'Train Loss': train_loss,
-                'Val Loss': val_loss
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "learning_rate": self.scheduler.get_last_lr()[0]
             })
 
-            # Step the scheduler if available
-            if self.scheduler:
-                self.scheduler.step()
-
-            # Save checkpoint if validation loss improves
-            if val_loss < best_val_loss - self.config.defaults.get('min_delta', 0.0):
+            if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                patience_counter = 0
-                self.save_checkpoint(epoch, val_loss, best=True)
-            else:
-                patience_counter += 1
+                self.save_checkpoint(epoch, val_loss)
 
-            # Early stopping
-            if patience_counter >= self.config.defaults.get('patience', 10):
-                self.logger.info("Early stopping triggered")
-                break
-
-        # Save the final model
         self.save_model()
 
-    def save_checkpoint(self, epoch: int, val_loss: float, best: bool = False):
-        """Save model checkpoint."""
+    def save_checkpoint(self, epoch, val_loss):
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'val_loss': val_loss,
-            'config': self.config.get_config()
+            'config': self.config
         }
-
-        if best:
-            checkpoint_path = self.output_dir / 'best_checkpoint.pt'
-        else:
-            checkpoint_path = self.output_dir / f'checkpoint_epoch_{epoch}.pt'
-
+        checkpoint_path = self.output_dir / f"checkpoint_epoch_{epoch + 1}.pt"
         torch.save(checkpoint, checkpoint_path)
-        self.logger.info(f"Saved checkpoint to {checkpoint_path}")
-        wandb.save(str(checkpoint_path))
-
-    def load_checkpoint(self, checkpoint_path: str):
-        """Load model checkpoint."""
-        checkpoint = torch.load(
-            checkpoint_path, map_location=self.config.defaults['device'])
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.logger.info(f"Loaded checkpoint from {checkpoint_path}")
-        return checkpoint['epoch'], checkpoint['val_loss']
+        logger.info(f"Saved checkpoint: {checkpoint_path}")
 
     def save_model(self):
-        """Save the final model."""
-        model_path = self.output_dir / 'final_model.pt'
-        torch.save(self.model.state_dict(), model_path)
-        self.logger.info(f"Saved final model to {model_path}")
-        wandb.save(str(model_path))
-
-
-# def main():
-#     # Example usage
-#     config_path = Path('config/config.yaml')  # Update with your config path
-#     config = YOLOConfig(config_path)
-
-#     data_dir = Path('data/coco')
-#     output_dir = Path('outputs')
-
-#     trainer = YOLOTrainer(config, data_dir, output_dir)
-#     trainer.train()
-
-
-# if __name__ == "__main__":
-#     main()
+        model_path = self.output_dir / "final_model.pt"
+        torch.save({
+            'model_state_dict': self.model.state_dict(),
+            'config': self.config
+        }, model_path)
+        logger.info(f"Saved final model: {model_path}")
