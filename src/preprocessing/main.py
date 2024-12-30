@@ -1,3 +1,14 @@
+"""
+Created on 30/12/2024
+
+@author: Aryan
+
+Filename: main.py
+
+Relative Path: src/preprocessing/main.py
+"""
+
+
 import os
 import json
 import random
@@ -7,6 +18,8 @@ from PIL import Image
 import magic
 from datetime import datetime
 import re
+from tqdm import tqdm
+import yaml
 
 regex = re.compile(r'^(train|val|test)_(image|calib|velodyne)$')
 
@@ -45,6 +58,19 @@ class KITTIToCOCOConverter:
 
         print(f"Parsed {len(self.calib_files)} calibration files, {len(self.image_files)} images, and {len(self.velodyne_files)} Velodyne files.")
         print(f"Parsed {len(self.test_calib_files)} calibration files, {len(self.test_image_files)} images, and {len(self.test_velodyne_files)} Velodyne files.")
+
+    def get_coco_data(self, split):
+        """Retrieve COCO data for the specified split."""
+        if split == 'train':
+            return {"images": self.train_images, "annotations": []}
+        elif split == 'val':
+            return {"images": self.val_images, "annotations": []}
+        elif split == 'test':
+            return {"images": self.test_images, "annotations": []}
+        else:
+            raise ValueError(
+                f"Invalid split: {split}. Expected 'train', 'val', or 'test'.")
+
 
     def organize_data(self):
         """Organize data into COCO format: categories, images, annotations."""
@@ -254,9 +280,89 @@ class KITTIToCOCOConverter:
             },
         }
 
+    def normalize_and_standardize_dataset(self, target_size=(640, 640)):
+        """
+            Normalizes and standardizes the dataset by resizing images and normalizing bounding box coordinates.
+
+            Parameters:
+            - target_size: tuple, target size (width, height) for resizing images.
+        """
+        try:
+            # Define directories for normalized data
+            normalized_images_dir = self.coco_output / "normalized_images"
+            normalized_images_dir.mkdir(parents=True, exist_ok=True)
+
+            # Iterate over train and validation sets
+            for split in ['train', 'val']:
+                images = getattr(self, f"{split}_images")
+                annotations = data = self.get_coco_data(split)['annotations']
+                skipped_images = 0
+
+                # Create a mapping from image_id to image data for quick access
+                image_id_map = {image['id']: image for image in images}
+
+                for image in tqdm(images, desc=f"Normalizing {split} images"):
+                       try:
+                            image_path = self.kitti_root / image['file_name']
+                            if not image_path.exists():
+                                skipped_images += 1
+                                print(
+                                    f"Image not found: {image_path}. Skipping.")
+                                continue
+
+                            # Open and resize the image
+                            with Image.open(image_path) as img:
+                                original_width, original_height = img.size
+                                img_resized = img.resize(
+                                    target_size, Image.Resampling.LANCZOS)
+                                resized_file_name = f"resized_{image['file_name'].name}"
+                                resized_image_path = normalized_images_dir / split
+                                resized_image_path.mkdir(
+                                    parents=True, exist_ok=True)
+                                img_resized.save(
+                                    resized_image_path / resized_file_name)
+
+                            # Update image metadata
+                            image['file_name'] = str(
+                                resized_image_path / resized_file_name)
+                            image['width'], image['height'] = target_size
+
+                            # Update annotations for the resized image
+                            for ann in self.annotations:
+                                if ann['image_id'] == image['id']:
+                                    bbox = ann['bbox']
+                                    normalized_bbox = [
+                                        bbox[0] / original_width *
+                                            target_size[0],
+                                        bbox[1] / original_height *
+                                            target_size[1],
+                                        bbox[2] / original_width *
+                                            target_size[0],
+                                        bbox[3] / original_height *
+                                            target_size[1]
+                                    ]
+                                    ann['bbox'] = normalized_bbox
+                                    ann['area'] = normalized_bbox[2] * \
+                                        normalized_bbox[3]
+
+                       except Exception as e:
+                            print(
+                                f"Error processing image {image['file_name']}: {e}")
+                            skipped_images += 1
+                        
+                print(
+                            f"Normalized {split} images. Skipped images: {skipped_images}")
+
+        except Exception as e:
+            print(f"Error during normalization: {e}")
+
+
     def save_data(self):
         """Save COCO data to output folder."""
         self.coco_output.mkdir(parents=True, exist_ok=True)
+
+        # Normalize the dataset before saving
+        self.normalize_and_standardize_dataset(target_size=(640, 640))
 
         coco_jsons = self.create_coco_json()
 
@@ -271,6 +377,10 @@ class KITTIToCOCOConverter:
             with open(self.coco_output / prefix / f"{key}.json", "w") as json_file:
                 json.dump(coco_data, json_file, indent=4)
 
+            # convert the json to yaml
+            with open(self.coco_output / prefix / f"{key}.yaml", "w") as yaml_file:
+                yaml.dump(coco_data, yaml_file, default_flow_style=False)
+
         print(f"COCO data saved to {self.coco_output}.")
 
 
@@ -281,4 +391,5 @@ if __name__ == "__main__":
     converter.parse_kitti_data()
     converter.organize_data()
     converter.split_data(train_ratio=0.8)
+    converter.normalize_and_standardize_dataset(target_size=(1242, 375))
     converter.save_data()
