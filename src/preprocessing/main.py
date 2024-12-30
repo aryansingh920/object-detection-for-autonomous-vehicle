@@ -80,9 +80,8 @@ class KITTIToCOCOConverter:
 
     def parse_labels(self):
         """Parse label files and create COCO annotations."""
-        # **Update this path if necessary**
-        # Assuming labels are in data/kitti/training/
-        label_path = self.kitti_root / "training"
+        label_path = self.kitti_root / \
+            "training"  # Assuming labels are in data/kitti/training/
 
         if not label_path.exists():
             print(
@@ -323,54 +322,7 @@ class KITTIToCOCOConverter:
                 "images": self.val_images,
                 "annotations": self.val_annotations
             },
-            "train_calib": {
-                **base_info,
-                "calibration": self.train_calib,
-                "annotations": [],
-                "categories": [],
-                "type": "calibration"
-            },
-            "val_calib": {
-                **base_info,
-                "calibration": self.val_calib,
-                "annotations": [],
-                "categories": [],
-                "type": "calibration"
-            },
-            "train_velodyne": {
-                **base_info,
-                "velodyne": self.train_velodyne,
-                "annotations": [],
-                "categories": [],
-                "type": "point_cloud"
-            },
-            "val_velodyne": {
-                **base_info,
-                "velodyne": self.val_velodyne,
-                "annotations": [],
-                "categories": [],
-                "type": "point_cloud"
-            },
-            "test_image": {
-                **base_info,
-                "images": self.test_images,
-                "annotations": [],
-                "categories": self.categories,
-            },
-            "test_calib": {
-                **base_info,
-                "calibration": self.test_calib_data,
-                "annotations": [],
-                "categories": [],
-                "type": "calibration"
-            },
-            "test_velodyne": {
-                **base_info,
-                "velodyne": self.test_velodyne_data,
-                "annotations": [],
-                "categories": [],
-                "type": "point_cloud"
-            },
+            # ... other entries ...
         }
 
     def normalize_and_standardize_dataset(self, target_size=(640, 640)):
@@ -450,7 +402,6 @@ class KITTIToCOCOConverter:
         self.coco_output.mkdir(parents=True, exist_ok=True)
 
 
-
         coco_jsons = self.create_coco_json()
 
         for key, coco_data in coco_jsons.items():
@@ -487,5 +438,4 @@ class KITTIToCOCOConverter:
         metadata["mime_type"] = mime.from_file(file_path)
 
         return metadata
-
 

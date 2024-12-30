@@ -15,7 +15,7 @@ class Config:
 
     # Preprocessing settings
     train_val_ratio = 0.8
-    normalize = False
+    normalize = True
     target_size_for_normalization = (1242, 375)
 
     # Model paths

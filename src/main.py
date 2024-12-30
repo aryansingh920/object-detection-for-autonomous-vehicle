@@ -22,8 +22,8 @@ def main():
     converter.parse_kitti_data()
     converter.organize_data()
     converter.split_data(train_ratio=Config.train_val_ratio)
-    # converter.normalize_and_standardize_dataset(
-    #     target_size=Config.target_size_for_normalization) if Config.normalize else None
+    converter.normalize_and_standardize_dataset(
+        target_size=Config.target_size_for_normalization) if Config.normalize else None
     converter.save_data()
 
 
