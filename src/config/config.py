@@ -9,11 +9,16 @@ Relative Path: src/config/config.py
 """
 
 class Config:
+    # Define paths (Update these paths as per your directory structure)
     kitti_base_path = r"data/kitti"
     coco_base_path = r"data/coco"
+
+    # Preprocessing settings
     train_val_ratio = 0.8
-    normalize = True
-    target_size = (1242, 375)
+    normalize = False
+    target_size_for_normalization = (1242, 375)
+
+    # Model paths
     saved_model_path = r"saved_model"
     output_path = r"output"
 
