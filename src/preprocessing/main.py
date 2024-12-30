@@ -282,10 +282,10 @@ class KITTIToCOCOConverter:
 
     def normalize_and_standardize_dataset(self, target_size=(640, 640)):
         """
-            Normalizes and standardizes the dataset by resizing images and normalizing bounding box coordinates.
+        Normalizes and standardizes the dataset by resizing images and normalizing bounding box coordinates.
 
-            Parameters:
-            - target_size: tuple, target size (width, height) for resizing images.
+        Parameters:
+        - target_size: tuple, target size (width, height) for resizing images.
         """
         try:
             # Define directories for normalized data
@@ -295,67 +295,60 @@ class KITTIToCOCOConverter:
             # Iterate over train and validation sets
             for split in ['train', 'val']:
                 images = getattr(self, f"{split}_images")
-                annotations = data = self.get_coco_data(split)['annotations']
+                annotations = self.get_coco_data(split)['annotations']
                 skipped_images = 0
 
                 # Create a mapping from image_id to image data for quick access
                 image_id_map = {image['id']: image for image in images}
 
                 for image in tqdm(images, desc=f"Normalizing {split} images"):
-                       try:
-                            image_path = self.kitti_root / image['file_name']
-                            if not image_path.exists():
-                                skipped_images += 1
-                                print(
-                                    f"Image not found: {image_path}. Skipping.")
-                                continue
-
-                            # Open and resize the image
-                            with Image.open(image_path) as img:
-                                original_width, original_height = img.size
-                                img_resized = img.resize(
-                                    target_size, Image.Resampling.LANCZOS)
-                                resized_file_name = f"resized_{image['file_name'].name}"
-                                resized_image_path = normalized_images_dir / split
-                                resized_image_path.mkdir(
-                                    parents=True, exist_ok=True)
-                                img_resized.save(
-                                    resized_image_path / resized_file_name)
-
-                            # Update image metadata
-                            image['file_name'] = str(
-                                resized_image_path / resized_file_name)
-                            image['width'], image['height'] = target_size
-
-                            # Update annotations for the resized image
-                            for ann in self.annotations:
-                                if ann['image_id'] == image['id']:
-                                    bbox = ann['bbox']
-                                    normalized_bbox = [
-                                        bbox[0] / original_width *
-                                            target_size[0],
-                                        bbox[1] / original_height *
-                                            target_size[1],
-                                        bbox[2] / original_width *
-                                            target_size[0],
-                                        bbox[3] / original_height *
-                                            target_size[1]
-                                    ]
-                                    ann['bbox'] = normalized_bbox
-                                    ann['area'] = normalized_bbox[2] * \
-                                        normalized_bbox[3]
-
-                       except Exception as e:
-                            print(
-                                f"Error processing image {image['file_name']}: {e}")
+                    try:
+                        # Convert to Path object
+                        image_path = Path(image['file_name'])
+                        if not image_path.exists():
                             skipped_images += 1
-                        
+                            print(f"Image not found: {image_path}. Skipping.")
+                            continue
+
+                        # Open and resize the image
+                        with Image.open(image_path) as img:
+                            original_width, original_height = img.size
+                            img_resized = img.resize(
+                                target_size, Image.Resampling.LANCZOS)
+                            resized_file_name = f"resized_{image_path.name}"
+                            resized_image_path = normalized_images_dir / split
+                            resized_image_path.mkdir(parents=True, exist_ok=True)
+                            img_resized.save(
+                                resized_image_path / resized_file_name)
+
+                        # Update image metadata
+                        image['file_name'] = str(
+                            resized_image_path / resized_file_name)
+                        image['width'], image['height'] = target_size
+
+                        # Update annotations for the resized image
+                        for ann in self.annotations:
+                            if ann['image_id'] == image['id']:
+                                bbox = ann['bbox']
+                                normalized_bbox = [
+                                    bbox[0] / original_width * target_size[0],
+                                    bbox[1] / original_height * target_size[1],
+                                    bbox[2] / original_width * target_size[0],
+                                    bbox[3] / original_height * target_size[1]
+                                ]
+                                ann['bbox'] = normalized_bbox
+                                ann['area'] = normalized_bbox[2] * \
+                                    normalized_bbox[3]
+
+                    except Exception as e:
+                        print(f"Error processing image {image['file_name']}: {e}")
+                        skipped_images += 1
+
                 print(
-                            f"Normalized {split} images. Skipped images: {skipped_images}")
+                    f"Normalized {split} images. Skipped images: {skipped_images}")
 
         except Exception as e:
             print(f"Error during normalization: {e}")
-
 
     def save_data(self):
         """Save COCO data to output folder."""
@@ -384,12 +377,12 @@ class KITTIToCOCOConverter:
         print(f"COCO data saved to {self.coco_output}.")
 
 
-# Example usage
-if __name__ == "__main__":
-    converter = KITTIToCOCOConverter(
-        kitti_root="data/kitti", coco_output="data/coco")
-    converter.parse_kitti_data()
-    converter.organize_data()
-    converter.split_data(train_ratio=0.8)
-    converter.normalize_and_standardize_dataset(target_size=(1242, 375))
-    converter.save_data()
+# # Example usage
+# if __name__ == "__main__":
+#     converter = KITTIToCOCOConverter(
+#         kitti_root="data/kitti", coco_output="data/coco")
+#     converter.parse_kitti_data()
+#     converter.organize_data()
+#     converter.split_data(train_ratio=0.8)
+#     converter.normalize_and_standardize_dataset(target_size=(1242, 375))
+#     converter.save_data()
