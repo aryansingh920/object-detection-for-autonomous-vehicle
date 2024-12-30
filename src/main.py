@@ -9,24 +9,21 @@ Relative Path: src/main.py
 """
 
 from preprocessing.main import KITTIToCOCOConverter
+from config.config import Config
 
 def main():
     # Define paths (Update these paths as per your directory structure)
-    kitti_base_path = r"data/kitti"
-    coco_base_path = r"data/coco"
-    train_val_ratio = 0.8
-    normalize = True
-    target_size = (1242, 375)
+
 
     # Step 1: Preprocess datasets (convert only KITTI)
     print("\n=== Step 1: Preprocessing Datasets ===")
     converter = KITTIToCOCOConverter(
-        kitti_root=kitti_base_path, coco_output=coco_base_path)
+        kitti_root=Config.kitti_base_path, coco_output=Config.coco_base_path)
     converter.parse_kitti_data()
     converter.organize_data()
-    converter.split_data(train_ratio=train_val_ratio)
+    converter.split_data(train_ratio=Config.train_val_ratio)
     converter.normalize_and_standardize_dataset(
-        target_size=target_size) if normalize else None
+        target_size=Config.target_size) if Config.normalize else None
     converter.save_data()
 
 

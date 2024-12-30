@@ -9,18 +9,16 @@ Relative Path: src/config/config.py
 """
 
 class Config:
-    """
-    Centralized configuration for the object detection pipeline.
-    """
-    # Dataset settings
-    dataset_type = "kitti"  # Options: "kitti" or "nuscenes"
-    data_root = "data"  # Path to the dataset root directory
-    # Name of the COCO-format annotation file
-    output_json = "output/annotations.json"
+    kitti_base_path = r"data/kitti"
+    coco_base_path = r"data/coco"
+    train_val_ratio = 0.8
+    normalize = True
+    target_size = (1242, 375)
+    saved_model_path = r"saved_model"
+    output_path = r"output"
 
-    # YOLO dataset YAML path
-    dataset_yaml = "input/coco/coco_datasets/kitti_coco_updated.yaml"
 
+class Hyperparameters:
     # Training hyperparameters
     batch_size = 16
     block_size = 32
