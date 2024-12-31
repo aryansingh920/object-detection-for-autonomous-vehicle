@@ -4,10 +4,8 @@ Created on 31/12/2024
 @author: Aryan
 
 Filename: YOLO_model.py
-
 Relative Path: src/train/YOLO_model.py
 """
-
 
 import torch
 from torch.utils.data import Dataset
@@ -43,8 +41,9 @@ class KITTIMultiModalDataset(Dataset):
             self.ann_data = json.load(f)
 
         # Convert list of images, list of annotations, etc.
-        self.images = self.image_data["images"]  # list of dict
-        self.annotations = self.ann_data["annotations"]  # list of dict
+        self.images = self.image_data["images"]             # list of dict
+        self.annotations = self.ann_data["annotations"]     # list of dict
+
         # Build an image_id -> list of annotation dicts
         self.image_id_to_anns = {}
         for ann in self.annotations:
@@ -53,7 +52,7 @@ class KITTIMultiModalDataset(Dataset):
                 self.image_id_to_anns[img_id] = []
             self.image_id_to_anns[img_id].append(ann)
 
-        # For transformations (resize, convert to tensor, etc.)
+        # Basic transformations (resize, convert to tensor, etc.)
         self.transform = transforms.Compose([
             transforms.Resize(image_size),
             transforms.ToTensor(),
@@ -75,16 +74,13 @@ class KITTIMultiModalDataset(Dataset):
         """
         image_info = self.images[idx]
         img_id = image_info["id"]
-        img_path = image_info["file_name"]  # e.g. data/kitti/...png
+        img_path = image_info["file_name"]  # e.g. 'data/kitti/...png'
 
-        # Load image
-        full_img_path = Path(image_info["file_name"])
+        # Load and transform the image
+        full_img_path = Path(img_path)
         image = Image.open(full_img_path).convert("RGB")
+        orig_w, orig_h = image.size
         image = self.transform(image)  # => CxHxW
-
-        # Get the original width/height (before we resized)
-        orig_w = image_info["width"]
-        orig_h = image_info["height"]
 
         # Retrieve all annotations for this image
         anns = self.image_id_to_anns.get(img_id, [])
@@ -101,13 +97,12 @@ class KITTIMultiModalDataset(Dataset):
             y_max = y + h
 
             # We might want to scale these to the new image_size
-            # since we did transforms.Resize(...). Let's do that:
             scale_x = self.image_size[0] / orig_w
             scale_y = self.image_size[1] / orig_h
-            x_min = x_min * scale_x
-            y_min = y_min * scale_y
-            x_max = x_max * scale_x
-            y_max = y_max * scale_y
+            x_min *= scale_x
+            y_min *= scale_y
+            x_max *= scale_x
+            y_max *= scale_y
 
             # category_id (1..8), TorchVision detection needs 1..(num_classes-1)
             label = ann["category_id"]  # e.g. 1..8

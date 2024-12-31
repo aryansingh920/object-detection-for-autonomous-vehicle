@@ -4,23 +4,25 @@ Created on 30/12/2024
 @author: Aryan
 
 Filename: main.py
-
 Relative Path: src/main.py
 """
 
-import torch  # <--- ADD THIS IMPORT
+import torch
 from pathlib import Path
 from preprocessing.main import KITTIToCOCOConverter
 from train.YOLO_trainer import TorchVisionTrainer
-from config.config import Config, YOLOConfig as ConfigYOLOConfig
+from config.config import Config
+
+
+
 
 
 def main():
-    # Step 1: Preprocess datasets (convert only KITTI)
-    # if Config.preprocess:
-    #     preprocess_datasets()
+    # Step 1: Preprocess datasets (convert only KITTI) if needed
+    if Config.preprocess:
+        preprocess_datasets()
 
-    # Step 2: Train model
+    # Step 2: Train model if needed
     if Config.train:
         train_model()
 
@@ -34,30 +36,22 @@ def preprocess_datasets():
     converter.parse_kitti_data()
     converter.organize_data()
     converter.split_data(train_ratio=Config.train_val_ratio)
-    # if Config.normalize:
-    #     converter.normalize_and_standardize_dataset(
-    #         target_size=Config.target_size_for_normalization
-    #     )
+
+    if Config.normalize:
+        converter.normalize_and_standardize_dataset(
+            target_size=Config.target_size_for_normalization
+        )
     converter.save_data()
 
 
 def train_model():
     print("\n=== Step 2: Training Model ===")
-    # if torch.backends.mps.is_available():
-    #     device = "mps"
-    if torch.cuda.is_available():
-        device = "cuda"
-    else:
-        device = "cpu"
-    trainer = TorchVisionTrainer(
-        data_root=Path("data/coco"),    # location of train/ val/ folders
-        batch_size=4,
-        num_classes=9,  # 8 KITTI classes + 1 for background
-        lr=1e-3,
-        num_epochs=1,
+    # Create data_root=Path("data/coco") or use Config.coco_base_path
+    config = Config()
+    # config.data_root = Path(config.coco_base_path)
 
-        device=device
-    )
+    # Build trainer from config
+    trainer = TorchVisionTrainer(config)
     trainer.train()
 
 

@@ -10,26 +10,38 @@ Relative Path: src/config/config.py
 
 from typing import Any, Dict, Optional
 import yaml
-
+from pathlib import Path
 
 class Config:
-    # Define paths (Update these paths as per your directory structure)
-    kitti_base_path = r"data/kitti"
-    coco_base_path = r"data/coco"
+    # General
+    preprocess = False          # Whether to run the preprocessing
+    train = True                # Whether to run training
+    kitti_base_path = "data/kitti"
+    coco_base_path = "data/coco"
+    # Convert to Path here
+    data_root = Path(coco_base_path)
 
-    # Preprocessing settings
-    preprocess = True
+    # For splitting
     train_val_ratio = 0.8
-    normalize = True
+    normalize = False
     target_size_for_normalization = (1242, 375)
 
-    # Training settings
-    train = True
+    target = target_size_for_normalization
 
-    # Model paths
-    saved_model_path = r"saved_model"
-    output_path = r"output"
+    # Training hyperparameters
+    batch_size = 8
+    num_classes = 9  # 8 KITTI classes + 1 background
+    lr = 1e-3
+    num_epochs = 1
 
+    # W&B logging
+    use_wandb = True
+    wandb_project_name = "kitti_frcnn"
+
+    model_name = "fasterrcnn_resnet50_fpn"
+
+    # Device can be 'auto', 'cuda', 'cpu', or 'mps'
+    device = "cuda"  # will auto-detect GPU/MPS if possible
 
 class YOLOConfig:
     """Hyperparameter configuration for YOLO training."""
