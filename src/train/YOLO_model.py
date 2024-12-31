@@ -1,11 +1,13 @@
 """
-Created on 30/12/2024
+Created on 31/12/2024
 
 @author: Aryan
 
-Filename: KITTIMultiModalDataset.py
-Relative Path: src/train/KITTIMultiModalDataset.py
+Filename: YOLO_model.py
+
+Relative Path: src/train/YOLO_model.py
 """
+
 
 import torch
 from torch.utils.data import Dataset

@@ -43,9 +43,9 @@ def preprocess_datasets():
 
 def train_model():
     print("\n=== Step 2: Training Model ===")
-    if torch.backends.mps.is_available():
-        device = "mps"
-    elif torch.backends.cuda.is_available():
+    # if torch.backends.mps.is_available():
+    #     device = "mps"
+    if torch.cuda.is_available():
         device = "cuda"
     else:
         device = "cpu"
