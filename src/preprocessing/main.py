@@ -1,3 +1,13 @@
+"""
+Created on 31/12/2024
+
+@author: Aryan
+
+Filename: main.py
+
+Relative Path: src/preprocessing/main.py
+"""
+
 import os
 import json
 import random
@@ -10,7 +20,8 @@ import re
 from tqdm import tqdm
 import yaml
 
-regex = re.compile(r'^(train|val|test)_(image|calib|velodyne)$')
+# Updated regex to include annotations as well
+regex = re.compile(r'^(train|val|test)_(image|calib|velodyne|annotations)$')
 
 
 class KITTIToCOCOConverter:
@@ -90,7 +101,8 @@ class KITTIToCOCOConverter:
             return
 
         for label_file in tqdm(self.label_files, desc="Parsing label files"):
-            image_id = self.get_image_id(label_file.stem)
+            image_stem = label_file.stem  # e.g. '000000'
+            image_id = self.get_image_id(image_stem)
             if image_id is None:
                 print(
                     f"No matching image found for label file {label_file.name}. Skipping.")
@@ -123,17 +135,16 @@ class KITTIToCOCOConverter:
                         f"Invalid bounding box values in file {label_file.name}: {line}")
                     continue  # Skip if coordinates are invalid
 
-                # Convert bbox to [x, y, width, height] format
+                # Convert bbox to [x, y, width, height]
                 x, y, x2, y2 = bbox
                 width = x2 - x
                 height = y2 - y
 
                 if width <= 0 or height <= 0:
-                    print(
-                        f"Non-positive width or height in file {label_file.name}: {line}")
-                    continue  # Skip invalid bboxes
+                    # Negative or zero dimension -> skip
+                    continue
 
-                # Get category ID
+                # Map category
                 category_id = self.category_mapping.get(class_name)
                 if category_id is None:
                     print(
@@ -147,7 +158,6 @@ class KITTIToCOCOConverter:
                     "bbox": [x, y, width, height],
                     "area": width * height,
                     "iscrowd": 0
-                    # "segmentation": []  # Optional: Add segmentation if available
                 }
                 self.annotations.append(annotation)
                 self.annotation_id += 1
@@ -182,11 +192,10 @@ class KITTIToCOCOConverter:
                 image = Image.open(image_file)
                 width, height = image.size
 
-                # Get detailed metadata
+                # Metadata
                 metadata = self.get_detailed_file_metadata(
                     self.kitti_root / image_file.relative_to(self.kitti_root))
 
-                # Add image info
                 self.images.append({
                     "id": img_id,
                     "file_name": f"data/kitti/{image_file.relative_to(self.kitti_root)}",
@@ -220,7 +229,7 @@ class KITTIToCOCOConverter:
                 image = Image.open(image_file)
                 width, height = image.size
 
-                # Get detailed metadata
+                # Metadata
                 metadata = self.get_detailed_file_metadata(
                     self.kitti_root / image_file.relative_to(self.kitti_root))
 
@@ -292,7 +301,7 @@ class KITTIToCOCOConverter:
             f"Assigned {len(self.train_annotations)} annotations to training and {len(self.val_annotations)} annotations to validation.")
 
     def create_coco_json(self):
-        """Create COCO JSON files for train and val sets."""
+        """Create COCO JSON files for train, val, and test sets."""
         base_info = {
             "info": {
                 "description": "KITTI Dataset converted to COCO format",
@@ -355,7 +364,7 @@ class KITTIToCOCOConverter:
                 **base_info,
                 "images": self.test_images,
                 "annotations": [],
-                "categories": self.categories,
+                "categories": self.categories
             },
             "test_calib": {
                 **base_info,
@@ -371,6 +380,22 @@ class KITTIToCOCOConverter:
                 "categories": [],
                 "type": "point_cloud"
             },
+            # Below are the new separate annotation entries:
+            "train_annotations": {
+                **base_info,
+                "annotations": self.train_annotations,
+                "categories": self.categories
+            },
+            "val_annotations": {
+                **base_info,
+                "annotations": self.val_annotations,
+                "categories": self.categories
+            },
+            "test_annotations": {
+                **base_info,
+                "annotations": [],
+                "categories": self.categories
+            },
         }
 
     def normalize_and_standardize_dataset(self, target_size=(640, 640)):
@@ -385,7 +410,6 @@ class KITTIToCOCOConverter:
             normalized_images_dir = self.coco_output / "normalized_images"
             normalized_images_dir.mkdir(parents=True, exist_ok=True)
 
-            # Iterate over train and validation sets
             for split in ['train', 'val']:
                 images = getattr(self, f"{split}_images")
                 annotations = self.train_annotations if split == 'train' else self.val_annotations
@@ -396,14 +420,12 @@ class KITTIToCOCOConverter:
 
                 for image in tqdm(images, desc=f"Normalizing {split} images"):
                     try:
-                        # Convert to Path object
                         image_path = Path(image['file_name'])
                         if not image_path.exists():
                             skipped_images += 1
                             print(f"Image not found: {image_path}. Skipping.")
                             continue
 
-                        # Open and resize the image
                         with Image.open(image_path) as img:
                             original_width, original_height = img.size
                             img_resized = img.resize(
@@ -420,7 +442,7 @@ class KITTIToCOCOConverter:
                             resized_image_path / resized_file_name)
                         image['width'], image['height'] = target_size
 
-                        # Update annotations for the resized image
+                        # Update annotations
                         for ann in annotations:
                             if ann['image_id'] == image['id']:
                                 bbox = ann['bbox']
@@ -449,8 +471,6 @@ class KITTIToCOCOConverter:
         """Save COCO data to output folder."""
         self.coco_output.mkdir(parents=True, exist_ok=True)
 
-
-
         coco_jsons = self.create_coco_json()
 
         for key, coco_data in coco_jsons.items():
@@ -459,12 +479,12 @@ class KITTIToCOCOConverter:
                 print(f"Skipping key '{key}' as it does not match the regex.")
                 continue
             prefix, suffix = match.groups()
-            # mkdir data/coco/prefix
+            # e.g. prefix='train' suffix='image' (or 'annotations', etc.)
             (self.coco_output / prefix).mkdir(parents=True, exist_ok=True)
             with open(self.coco_output / prefix / f"{key}.json", "w") as json_file:
                 json.dump(coco_data, json_file, indent=4)
 
-            # Convert the json to yaml
+            # Also save as YAML
             with open(self.coco_output / prefix / f"{key}.yaml", "w") as yaml_file:
                 yaml.dump(coco_data, yaml_file, default_flow_style=False)
 
@@ -472,20 +492,16 @@ class KITTIToCOCOConverter:
 
     def get_detailed_file_metadata(self, file_path):
         """Get detailed metadata of a file."""
-        # Get basic file statistics
         stat_info = os.stat(file_path)
         metadata = {
             "file_name": os.path.basename(file_path),
-            "file_size": stat_info.st_size,  # Size in bytes
+            "file_size": stat_info.st_size,
             "created": datetime.fromtimestamp(stat_info.st_ctime),
             "modified": datetime.fromtimestamp(stat_info.st_mtime),
             "accessed": datetime.fromtimestamp(stat_info.st_atime),
         }
 
-        # Use magic to get detailed MIME type
         mime = magic.Magic(mime=True)
         metadata["mime_type"] = mime.from_file(file_path)
 
         return metadata
-
-

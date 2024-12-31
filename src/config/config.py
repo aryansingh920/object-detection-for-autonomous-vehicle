@@ -18,9 +18,9 @@ class Config:
     coco_base_path = r"data/coco"
 
     # Preprocessing settings
-    preprocess = False
+    preprocess = True
     train_val_ratio = 0.8
-    normalize = False
+    normalize = True
     target_size_for_normalization = (1242, 375)
 
     # Training settings
