@@ -29,7 +29,7 @@ class Config:
     target = target_size_for_normalization
 
     # Training hyperparameters
-    batch_size = 8
+    batch_size = 1
     num_classes = 9  # 8 KITTI classes + 1 background
     lr = 1e-3
     num_epochs = 1
@@ -41,7 +41,7 @@ class Config:
     model_name = "fasterrcnn_resnet50_fpn"
 
     # Device can be 'auto', 'cuda', 'cpu', or 'mps'
-    device = "cuda"  # will auto-detect GPU/MPS if possible
+    device = "auto"  # will auto-detect GPU/MPS if possible
 
 class YOLOConfig:
     """Hyperparameter configuration for YOLO training."""

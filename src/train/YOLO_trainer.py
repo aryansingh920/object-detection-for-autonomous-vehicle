@@ -77,7 +77,7 @@ class TorchVisionTrainer:
         else:
             self.device = config.device
 
-        print("Config", config)
+        # print("Config", config)
 
         # Logging
         logging.basicConfig(level=logging.INFO)
@@ -155,7 +155,10 @@ class TorchVisionTrainer:
 
         for i, (images, targets) in enumerate(loader):
             # Move data to the chosen device
-            images = [img.to(self.device) for img in images]
+            print(f"Batch {i}:")
+            # print(f"Images shape: {[img.shape for img in images]}")
+            # print(f"Targets: {targets}")
+            images = [img.to(self.device).contiguous() for img in images]
             images = [img.contiguous() for img in images]
 
             new_targets = []
@@ -210,7 +213,7 @@ class TorchVisionTrainer:
         )
 
         for i, (images, targets) in enumerate(loader):
-            images = [img.to(self.device) for img in images]
+            images = [img.to(self.device).contiguous for img in images]
             new_targets = []
             for t in targets:
                 new_t = {
@@ -224,7 +227,7 @@ class TorchVisionTrainer:
             loss_dict = self.model(images, new_targets)
             loss = sum(loss for loss in loss_dict.values())
             total_loss += loss.item()
-
+            loss.backward()
             loader.set_postfix({"batch_loss": loss.item()})
 
         avg_val_loss = total_loss / len(self.val_loader)
