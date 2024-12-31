@@ -43,13 +43,20 @@ def preprocess_datasets():
 
 def train_model():
     print("\n=== Step 2: Training Model ===")
+    if torch.backends.mps.is_available():
+        device = "mps"
+    elif torch.backends.cuda.is_available():
+        device = "cuda"
+    else:
+        device = "cpu"
     trainer = TorchVisionTrainer(
         data_root=Path("data/coco"),    # location of train/ val/ folders
         batch_size=4,
         num_classes=9,  # 8 KITTI classes + 1 for background
         lr=1e-3,
-        num_epochs=2,
-        device="mps" if torch.backends.mps.is_available() else "cuda"
+        num_epochs=1,
+
+        device=device
     )
     trainer.train()
 

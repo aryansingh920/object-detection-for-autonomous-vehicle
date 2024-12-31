@@ -127,11 +127,12 @@ class TorchVisionTrainer:
         for i, (images, targets) in enumerate(loader):
             # Move data to device
             images = [img.to(self.device) for img in images]
+            images = [img.contiguous() for img in images]
             new_targets = []
             for t in targets:
                 new_t = {
-                    "boxes": t["boxes"].to(self.device),
-                    "labels": t["labels"].to(self.device),
+                    "boxes": t["boxes"].to(self.device).contiguous(),
+                    "labels": t["labels"].to(self.device).contiguous(),
                     "image_id": t["image_id"],  # can stay on CPU
                 }
                 new_targets.append(new_t)
