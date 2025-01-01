@@ -41,7 +41,7 @@ class Config:
     model_name = "fasterrcnn_resnet50_fpn"
 
     # Device can be 'auto', 'cuda', 'cpu', or 'mps'
-    device = "auto"  # will auto-detect GPU/MPS if possible
+    device = "cpu"  # will auto-detect GPU/MPS if possible
 
 class YOLOConfig:
     """Hyperparameter configuration for YOLO training."""
