@@ -295,12 +295,12 @@ class TorchVisionTrainer:
         model_path.mkdir(parents=True, exist_ok=True)
 
         # Save model weights
-        fname = "best_model.pt" if best else f"checkpoint_epoch_{epoch}.pt"
+        fname = f"{self.config.model_name}.pt" if best else f"{self.config.model_name}_checkpoint_epoch_{epoch}.pt"
         torch.save(self.model.state_dict(), model_path / fname)
         self.logger.info(f"Saved model weights to {model_path / fname}")
 
         # Save model configuration as JSON
-        json_fname = "best_model.json" if best else f"checkpoint_epoch_{epoch}.json"
+        json_fname = f"{self.config.model_name}.json" if best else f"{self.config.model_name}_checkpoint_epoch_{epoch}.json"
         model_config = {
             "epoch": epoch,
             "best": best,
