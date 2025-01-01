@@ -6,9 +6,6 @@ Created on 30/12/2024
 Filename: main.py
 Relative Path: src/main.py
 """
-
-import torch
-from pathlib import Path
 from preprocessing.main import KITTIToCOCOConverter
 from train.YOLO_trainer import TorchVisionTrainer
 from config.config import Config

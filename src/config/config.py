@@ -8,8 +8,6 @@ Filename: config.py
 Relative Path: src/config/config.py
 """
 
-from typing import Any, Dict, Optional
-import yaml
 from pathlib import Path
 
 
