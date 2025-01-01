@@ -27,7 +27,7 @@ from train.YOLO_model import KITTIMultiModalDataset
 def get_fasterrcnn_model(num_classes: int):
     """
     Returns a Faster R-CNN model, pre-trained on COCO,
-    with a new classification head for `num_classes`.
+    with a new classification head for num_classes.
     TorchVision expects num_classes = (# real classes) + 1 for background.
     """
     # Load a model pre-trained on COCO
@@ -52,6 +52,8 @@ class TorchVisionTrainer:
           - device (str or 'auto')
           - use_wandb (bool)
           - wandb_project_name (str)
+          - patience (int) -> for early stopping
+          - min_delta (float) -> for early stopping
           - any other relevant hyperparameters
         """
         self.config = config
@@ -64,7 +66,10 @@ class TorchVisionTrainer:
         print("Config device", config.device)
         print("Config use_wandb", config.use_wandb)
         print("Config wandb_project_name", config.wandb_project_name)
-        print("Config any other relevant hyperparameters", config)
+
+        # Early Stopping params
+        self.patience = getattr(config, "patience", 5)
+        self.min_delta = getattr(config, "min_delta", 1e-4)
 
         # Device logic
         if config.device == "auto":
@@ -76,8 +81,6 @@ class TorchVisionTrainer:
                 self.device = "cpu"
         else:
             self.device = config.device
-
-        # print("Config", config)
 
         # Logging
         logging.basicConfig(level=logging.INFO)
@@ -93,6 +96,8 @@ class TorchVisionTrainer:
                 "num_epochs": config.num_epochs,
                 "num_classes": config.num_classes,
                 "device": self.device,
+                "patience": self.patience,
+                "min_delta": self.min_delta,
             })
 
         # Build datasets
@@ -155,18 +160,13 @@ class TorchVisionTrainer:
 
         for i, (images, targets) in enumerate(loader):
             # Move data to the chosen device
-            print(f"Batch {i}:")
-            # print(f"Images shape: {[img.shape for img in images]}")
-            # print(f"Targets: {targets}")
             images = [img.to(self.device).contiguous() for img in images]
-            images = [img.contiguous() for img in images]
 
             new_targets = []
             for t in targets:
                 new_t = {
                     "boxes": t["boxes"].to(self.device).contiguous(),
                     "labels": t["labels"].to(self.device).contiguous(),
-                    # can stay on CPU, but typically it's small
                     "image_id": t["image_id"],
                 }
                 new_targets.append(new_t)
@@ -201,6 +201,8 @@ class TorchVisionTrainer:
         if self.use_wandb:
             wandb.log({"train_epoch_loss": avg_loss, "epoch": epoch})
 
+        return avg_loss
+
     @torch.no_grad()
     def validate(self, epoch):
         self.model.eval()
@@ -213,7 +215,8 @@ class TorchVisionTrainer:
         )
 
         for i, (images, targets) in enumerate(loader):
-            images = [img.to(self.device).contiguous for img in images]
+            images = [img.to(self.device).contiguous() for img in images]
+
             new_targets = []
             for t in targets:
                 new_t = {
@@ -227,7 +230,7 @@ class TorchVisionTrainer:
             loss_dict = self.model(images, new_targets)
             loss = sum(loss for loss in loss_dict.values())
             total_loss += loss.item()
-            loss.backward()
+
             loader.set_postfix({"batch_loss": loss.item()})
 
         avg_val_loss = total_loss / len(self.val_loader)
@@ -240,17 +243,63 @@ class TorchVisionTrainer:
         return avg_val_loss
 
     def train(self):
-        best_val_loss = float('inf')
+        best_val_loss = float("inf")
+        epochs_no_improve = 0
+
         for epoch in range(1, self.config.num_epochs + 1):
             self.logger.info(
                 f"===== EPOCH {epoch} / {self.config.num_epochs} =====")
-            self.train_one_epoch(epoch)
+            train_loss = self.train_one_epoch(epoch)
             val_loss = self.validate(epoch)
 
-            # If improved, save checkpoint
-            if val_loss < best_val_loss:
+            # Early Stopping Check
+            if val_loss < (best_val_loss - self.min_delta):
                 best_val_loss = val_loss
+                epochs_no_improve = 0
                 self.save_checkpoint(epoch, best=True)
+            else:
+                epochs_no_improve += 1
+
+            # If patience is exceeded, stop training
+            if epochs_no_improve >= self.patience:
+                self.logger.info(
+                    f"No improvement for {self.patience} consecutive epochs. Early stopping.")
+                break
+
+    def overfit_on_batch(self, num_steps=100):
+        """
+        Debug function to see if the model can overfit on a single batch
+        (or a small subset) from the DataLoader.
+        """
+        self.model.train()
+
+        # Grab just 1 batch from the loader
+        single_batch = next(iter(self.train_loader))
+        images, targets = single_batch
+
+        # Move to device
+        images = [img.to(self.device).contiguous() for img in images]
+        new_targets = []
+        for t in targets:
+            new_t = {
+                "boxes": t["boxes"].to(self.device).contiguous(),
+                "labels": t["labels"].to(self.device).contiguous(),
+                "image_id": t["image_id"],
+            }
+            new_targets.append(new_t)
+
+        for step in range(num_steps):
+            loss_dict = self.model(images, new_targets)
+            loss = sum(loss for loss in loss_dict.values())
+
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+
+            # Optionally log
+            if step % 10 == 0:
+                self.logger.info(
+                    f"[Overfit step {step}/{num_steps}] Loss: {loss.item():.4f}")
 
     def save_checkpoint(self, epoch, best=False):
         model_path = Path("output")

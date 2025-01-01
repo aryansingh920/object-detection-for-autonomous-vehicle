@@ -52,6 +52,7 @@ def train_model():
 
     # Build trainer from config
     trainer = TorchVisionTrainer(config)
+    trainer.overfit_on_batch(num_steps=100)
     trainer.train()
 
 
