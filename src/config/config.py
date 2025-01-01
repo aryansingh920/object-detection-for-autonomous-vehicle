@@ -27,10 +27,10 @@ class Config:
     target = target_size_for_normalization
 
     # Training hyperparameters
-    batch_size = 1
+    batch_size = 4
     num_classes = 9  # 8 KITTI classes + 1 background
     lr = 1e-3
-    num_epochs = 1
+    num_epochs = 2
 
     # W&B logging
     use_wandb = True
