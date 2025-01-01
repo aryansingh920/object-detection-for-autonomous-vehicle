@@ -14,7 +14,7 @@ from pathlib import Path
 
 class Config:
     # General
-    preprocess = False          # Whether to run the preprocessing
+    preprocess = True          # Whether to run the preprocessing
     train = True                # Whether to run training
     kitti_base_path = "data/kitti"
     coco_base_path = "data/coco"
@@ -23,7 +23,7 @@ class Config:
 
     # For splitting
     train_val_ratio = 0.8
-    normalize = False
+    normalize = True
     target_size_for_normalization = (1242, 375)
 
     target = target_size_for_normalization
