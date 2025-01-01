@@ -10,19 +10,15 @@ Relative Path: src/train/YOLO_trainer.py
 import json
 import logging
 from pathlib import Path
-
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import torchvision
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-
 from tqdm import tqdm
 import wandb
-
-# Our dataset
 from train.YOLO_model import KITTIMultiModalDataset
-
+from config.config import Config
 
 def get_fasterrcnn_model(num_classes: int):
     """
@@ -41,7 +37,7 @@ def get_fasterrcnn_model(num_classes: int):
 
 
 class TorchVisionTrainer:
-    def __init__(self, config):
+    def __init__(self, config: Config):
         """
         config should contain:
           - data_root (Path)
@@ -58,15 +54,6 @@ class TorchVisionTrainer:
         """
         self.config = config
 
-        print("Config data_root", config.data_root)
-        print("Config batch_size", config.batch_size)
-        print("Config num_classes", config.num_classes)
-        print("Config lr", config.lr)
-        print("Config num_epochs", config.num_epochs)
-        print("Config device", config.device)
-        print("Config use_wandb", config.use_wandb)
-        print("Config wandb_project_name", config.wandb_project_name)
-
         # Early Stopping params
         self.patience = getattr(config, "patience", 5)
         self.min_delta = getattr(config, "min_delta", 1e-4)
@@ -81,6 +68,8 @@ class TorchVisionTrainer:
                 self.device = "cpu"
         else:
             self.device = config.device
+
+        print(f"Using device: {self.device}")
 
         # Logging
         logging.basicConfig(level=logging.INFO)
@@ -110,7 +99,7 @@ class TorchVisionTrainer:
         self.val_dataset = KITTIMultiModalDataset(
             coco_dir=config.data_root,
             split="val",
-            image_size=(640, 640),
+            image_size=config.target,
             num_classes=config.num_classes
         )
 
