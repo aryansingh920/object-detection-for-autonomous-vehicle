@@ -7,6 +7,7 @@ Filename: main.py
 Relative Path: src/main.py
 """
 from preprocessing.main import KITTIToCOCOConverter
+from preprocessing.validate_dataset import DataValidator
 from train.YOLO_trainer import TorchVisionTrainer
 from config.config import Config
 
@@ -19,7 +20,11 @@ def main():
     if Config.preprocess:
         preprocess_datasets()
 
-    # Step 2: Train model if needed
+    # Step 1.1: Validate dataset
+    if Config.validate:
+        validate_dataset()
+
+    # Step 3: Train model if needed
     if Config.train:
         train_model()
 
@@ -40,6 +45,16 @@ def preprocess_datasets():
         )
     converter.save_data()
 
+
+def validate_dataset():
+    dataset_path = Config.coco_base_path
+    for dir in ["train", "val"]:
+        # if not (dataset_path / dir).exists():
+        #     raise FileNotFoundError(
+        #         f"Directory {dir} not found in {dataset_path}")
+        # else:
+        validator = DataValidator(dataset_path=dataset_path, split=dir)
+        validator.validate_dataset()
 
 def train_model():
     print("\n=== Step 2: Training Model ===")

@@ -13,9 +13,10 @@ from pathlib import Path
 
 class Config:
     # General
-    preprocess = False          # Whether to run the preprocessing
+    preprocess = True          # Whether to run the preprocessing
     normalize = False           # Whether to normalize the dataset
-    train = True                # Whether to run training
+    validate = False             # Whether to run validation
+    train = False                # Whether to run training
 
     kitti_base_path = "data/kitti"
     coco_base_path = "data/coco"
@@ -27,10 +28,10 @@ class Config:
     target = target_size_for_normalization
 
     # Training hyperparameters
-    batch_size = 4
+    batch_size = 1
     num_classes = 9  # 8 KITTI classes + 1 background
     lr = 1e-3
-    num_epochs = 2
+    num_epochs = 1
 
     # W&B logging
     use_wandb = True
@@ -39,4 +40,4 @@ class Config:
     model_name = "fasterrcnn_resnet50_fpn"
 
     # Device can be 'auto', 'cuda', 'cpu', or 'mps'
-    device = "auto"  # will auto-detect GPU/MPS if possible
+    device = "cpu"  # will auto-detect GPU/MPS if possible

@@ -10,6 +10,7 @@ Relative Path: src/train/YOLO_trainer.py
 import json
 import logging
 from pathlib import Path
+
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -17,8 +18,13 @@ import torchvision
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from tqdm import tqdm
 import wandb
+
 from train.YOLO_model import KITTIMultiModalDataset
 from config.config import Config
+
+# 1. Import Mixed Precision Utilities from torch.amp
+from torch.amp import autocast, GradScaler
+
 
 def get_fasterrcnn_model(num_classes: int):
     """
@@ -28,7 +34,8 @@ def get_fasterrcnn_model(num_classes: int):
     """
     # Load a model pre-trained on COCO
     model = torchvision.models.detection.fasterrcnn_resnet50_fpn(
-        weights="DEFAULT")
+        weights="DEFAULT"
+    )
     # Get the number of input features for the classifier
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     # Replace the pre-trained head
@@ -40,17 +47,17 @@ class TorchVisionTrainer:
     def __init__(self, config: Config):
         """
         config should contain:
-          - data_root (Path)
-          - batch_size (int)
-          - num_classes (int)
-          - lr (float)
-          - num_epochs (int)
-          - device (str or 'auto')
-          - use_wandb (bool)
-          - wandb_project_name (str)
-          - patience (int) -> for early stopping
-          - min_delta (float) -> for early stopping
-          - any other relevant hyperparameters
+        - data_root (Path)
+        - batch_size (int)
+        - num_classes (int)
+        - lr (float)
+        - num_epochs (int)
+        - device (str or 'auto')
+        - use_wandb (bool)
+        - wandb_project_name (str)
+        - patience (int) -> for early stopping
+        - min_delta (float) -> for early stopping
+        - any other relevant hyperparameters
         """
         self.config = config
 
@@ -58,7 +65,7 @@ class TorchVisionTrainer:
         self.patience = getattr(config, "patience", 5)
         self.min_delta = getattr(config, "min_delta", 1e-4)
 
-        # Device logic
+        # Device detection
         if config.device == "auto":
             if torch.cuda.is_available():
                 self.device = "cuda"
@@ -69,7 +76,24 @@ class TorchVisionTrainer:
         else:
             self.device = config.device
 
+        # AMP & GradScaler setup
+        if self.device == "cuda":
+            self.autocast_enabled = True
+            self.autocast_device = "cuda"
+            self.scaler = GradScaler("cuda")
+        elif self.device == "mps":
+            self.autocast_enabled = False  # Disable AMP for MPS
+            self.scaler = None
+            self.autocast_device = None  # No autocast device for MPS
+        else:
+            self.autocast_enabled = False  # Disable AMP for CPU
+            self.scaler = None
+            self.autocast_device = None
+
         print(f"Using device: {self.device}")
+        if self.device == "mps":
+            logging.warning(
+                "MPS backend is being used. AMP and FP16 are disabled due to limited support.")
 
         # Logging
         logging.basicConfig(level=logging.INFO)
@@ -89,7 +113,7 @@ class TorchVisionTrainer:
                 "min_delta": self.min_delta,
             })
 
-        # Build datasets
+        # Dataset setup
         self.train_dataset = KITTIMultiModalDataset(
             coco_dir=config.data_root,
             split="train",
@@ -103,13 +127,11 @@ class TorchVisionTrainer:
             num_classes=config.num_classes
         )
 
-        # Build dataloaders
-        # IMPORTANT: set num_workers=0 if you're on macOS MPS to avoid certain issues
         self.train_loader = DataLoader(
             self.train_dataset,
             batch_size=config.batch_size,
             shuffle=True,
-            num_workers=0,
+            num_workers=4,
             collate_fn=self.collate_fn
         )
         self.val_loader = DataLoader(
@@ -120,7 +142,7 @@ class TorchVisionTrainer:
             collate_fn=self.collate_fn
         )
 
-        # Initialize model & optimizer
+        # Model & Optimizer
         self.model = get_fasterrcnn_model(config.num_classes).to(self.device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=config.lr)
 
@@ -149,28 +171,44 @@ class TorchVisionTrainer:
 
         for i, (images, targets) in enumerate(loader):
             # Move data to the chosen device
-            images = [img.to(self.device).contiguous() for img in images]
+            images = [img.to(self.device) for img in images]
 
             new_targets = []
             for t in targets:
                 new_t = {
-                    "boxes": t["boxes"].to(self.device).contiguous(),
-                    "labels": t["labels"].to(self.device).contiguous(),
+                    "boxes": t["boxes"].to(self.device),
+                    "labels": t["labels"].to(self.device),
                     "image_id": t["image_id"],
                 }
                 new_targets.append(new_t)
 
-            # Forward pass => returns a dict of losses
-            loss_dict = self.model(images, new_targets)
-            loss = sum(loss for loss in loss_dict.values())
+            # ------------------
+            # Forward pass (AMP)
+            # ------------------
+            if self.autocast_enabled:
+                with autocast(device_type=self.autocast_device, dtype=torch.float16):
+                    loss_dict = self.model(images, new_targets)
+                    loss = sum(loss for loss in loss_dict.values())
 
+            else:
+                loss_dict = self.model(images, new_targets)
+                loss = sum(loss for loss in loss_dict.values())
             self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
+
+            # -------------------
+            # Backward + Step
+            # -------------------
+            if self.scaler:
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                loss.backward()
+                self.optimizer.step()
 
             total_loss += loss.item()
 
-            # Log to W&B
+            # Log to W&B if needed
             if self.use_wandb:
                 wandb.log({"train_batch_loss": loss.item()})
 
@@ -192,34 +230,78 @@ class TorchVisionTrainer:
 
         return avg_loss
 
+    # @torch.no_grad()
+    # def validate(self, epoch):
+    #     self.model.eval()
+    #     total_loss = 0.0
+
+    #     loader = tqdm(
+    #         self.val_loader,
+    #         desc=f"Validation Epoch {epoch}/{self.config.num_epochs}",
+    #         leave=False
+    #     )
+
+    #     for i, (images, targets) in enumerate(loader):
+    #         images = [img.to(self.device) for img in images]
+
+    #         new_targets = []
+    #         for t in targets:
+    #             new_t = {
+    #                 "boxes": t["boxes"].to(self.device),
+    #                 "labels": t["labels"].to(self.device),
+    #                 "image_id": t["image_id"],
+    #             }
+    #             new_targets.append(new_t)
+
+    #         # Validation forward also benefits from autocast
+    #         if self.autocast_enabled:
+    #             with autocast(device_type=self.autocast_device, dtype=torch.float16):
+    #                 loss_dict = self.model(images, new_targets)
+    #                 loss = sum(loss for loss in loss_dict.values())
+
+    #         else:
+    #             loss_dict = self.model(images, new_targets)
+    #             loss = sum(loss for loss in loss_dict.values())
+
+    #         total_loss += loss.item()
+    #         loader.set_postfix({"batch_loss": loss.item()})
+
+    #     avg_val_loss = total_loss / len(self.val_loader)
+    #     self.logger.info(
+    #         f"** Epoch {epoch} Validation Loss: {avg_val_loss:.4f}")
+
+    #     if self.use_wandb:
+    #         wandb.log({"val_loss": avg_val_loss, "epoch": epoch})
+
+    #     return avg_val_loss
+
+
     @torch.no_grad()
     def validate(self, epoch):
-        self.model.eval()
-        total_loss = 0.0
+        # Temporarily set model to train so it returns losses
+        self.model.train()
 
+        total_loss = 0.0
         loader = tqdm(
-            self.val_loader,
-            desc=f"Validation Epoch {epoch}/{self.config.num_epochs}",
-            leave=False
-        )
+            self.val_loader, desc=f"Validation Epoch {epoch}/{self.config.num_epochs}", leave=False)
 
         for i, (images, targets) in enumerate(loader):
-            images = [img.to(self.device).contiguous() for img in images]
-
+            # Prepare images & targets
+            images = [img.to(self.device) for img in images]
             new_targets = []
             for t in targets:
-                new_t = {
+                new_targets.append({
                     "boxes": t["boxes"].to(self.device),
                     "labels": t["labels"].to(self.device),
                     "image_id": t["image_id"],
-                }
-                new_targets.append(new_t)
+                })
 
-            # In eval mode, passing targets returns the detection loss
+            # Forward pass
+            # model is in train mode
             loss_dict = self.model(images, new_targets)
             loss = sum(loss for loss in loss_dict.values())
-            total_loss += loss.item()
 
+            total_loss += loss.item()
             loader.set_postfix({"batch_loss": loss.item()})
 
         avg_val_loss = total_loss / len(self.val_loader)
@@ -229,7 +311,11 @@ class TorchVisionTrainer:
         if self.use_wandb:
             wandb.log({"val_loss": avg_val_loss, "epoch": epoch})
 
+        # Restore model to eval() if you need it for other inference tasks:
+        self.model.eval()
+
         return avg_val_loss
+
 
     def train(self):
         best_val_loss = float("inf")
@@ -241,7 +327,9 @@ class TorchVisionTrainer:
             train_loss = self.train_one_epoch(epoch)
             val_loss = self.validate(epoch)
 
-            # Early Stopping Check
+            # -----------------
+            # Early Stopping
+            # -----------------
             if val_loss < (best_val_loss - self.min_delta):
                 best_val_loss = val_loss
                 epochs_no_improve = 0
@@ -249,10 +337,10 @@ class TorchVisionTrainer:
             else:
                 epochs_no_improve += 1
 
-            # If patience is exceeded, stop training
             if epochs_no_improve >= self.patience:
                 self.logger.info(
-                    f"No improvement for {self.patience} consecutive epochs. Early stopping.")
+                    f"No improvement for {self.patience} consecutive epochs. Early stopping."
+                )
                 break
 
     def overfit_on_batch(self, num_steps=100):
@@ -266,41 +354,61 @@ class TorchVisionTrainer:
         single_batch = next(iter(self.train_loader))
         images, targets = single_batch
 
-        # Move to device
-        images = [img.to(self.device).contiguous() for img in images]
+        images = [img.to(self.device) for img in images]
         new_targets = []
         for t in targets:
             new_t = {
-                "boxes": t["boxes"].to(self.device).contiguous(),
-                "labels": t["labels"].to(self.device).contiguous(),
+                "boxes": t["boxes"].to(self.device),
+                "labels": t["labels"].to(self.device),
                 "image_id": t["image_id"],
             }
             new_targets.append(new_t)
 
         for step in range(num_steps):
-            loss_dict = self.model(images, new_targets)
-            loss = sum(loss for loss in loss_dict.values())
+            if self.autocast_enabled:
+                with autocast(device_type=self.autocast_device, dtype=torch.float16):
+                    loss_dict = self.model(images, new_targets)
+                    loss = sum(loss for loss in loss_dict.values())
+
+            else:
+                loss_dict = self.model(images, new_targets)
+                loss = sum(loss for loss in loss_dict.values())
 
             self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
+
+            if self.scaler:
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                loss.backward()
+                self.optimizer.step()
 
             # Optionally log
             if step % 10 == 0:
                 self.logger.info(
-                    f"[Overfit step {step}/{num_steps}] Loss: {loss.item():.4f}")
+                    f"[Overfit step {step}/{num_steps}] Loss: {loss.item():.4f}"
+                )
 
     def save_checkpoint(self, epoch, best=False):
         model_path = Path("output")
         model_path.mkdir(parents=True, exist_ok=True)
 
         # Save model weights
-        fname = f"{self.config.model_name}.pt" if best else f"{self.config.model_name}_checkpoint_epoch_{epoch}.pt"
+        fname = (
+            f"{self.config.model_name}.pt"
+            if best
+            else f"{self.config.model_name}_checkpoint_epoch_{epoch}.pt"
+        )
         torch.save(self.model.state_dict(), model_path / fname)
         self.logger.info(f"Saved model weights to {model_path / fname}")
 
         # Save model configuration as JSON
-        json_fname = f"{self.config.model_name}.json" if best else f"{self.config.model_name}_checkpoint_epoch_{epoch}.json"
+        json_fname = (
+            f"{self.config.model_name}.json"
+            if best
+            else f"{self.config.model_name}_checkpoint_epoch_{epoch}.json"
+        )
         model_config = {
             "epoch": epoch,
             "best": best,
