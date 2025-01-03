@@ -13,13 +13,14 @@ from pathlib import Path
 
 class Config:
     # General
-    preprocess = True          # Whether to run the preprocessing
+    preprocess = False          # Whether to run the preprocessing
     normalize = False           # Whether to normalize the dataset
-    validate = False             # Whether to run validation
+    validate = True             # Whether to run validation
     train = False                # Whether to run training
 
     kitti_base_path = "data/kitti"
     coco_base_path = "data/coco"
+    validated_image_path = "verified"
     data_root = Path(coco_base_path)
 
     # For splitting

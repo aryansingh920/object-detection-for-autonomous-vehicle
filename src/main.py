@@ -6,6 +6,8 @@ Created on 30/12/2024
 Filename: main.py
 Relative Path: src/main.py
 """
+from pathlib import Path
+
 from preprocessing.main import KITTIToCOCOConverter
 from preprocessing.validate_dataset import DataValidator
 from train.YOLO_trainer import TorchVisionTrainer
@@ -55,6 +57,20 @@ def validate_dataset():
         # else:
         validator = DataValidator(dataset_path=dataset_path, split=dir)
         validator.validate_dataset()
+        print("Dataset path: ", dataset_path)
+        validator.save_random_images_with_bboxes_without_calibration(
+            split=dir,
+            output_dir=Config.validated_image_path,
+            num_images=5
+        )
+        # validator.save_random_images_with_bboxes(
+        #     split=dir,
+        #     output_dir=Config.validated_image_path,
+        #     num_images=5
+        # )
+
+
+
 
 def train_model():
     print("\n=== Step 2: Training Model ===")
