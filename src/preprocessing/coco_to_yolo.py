@@ -1,6 +1,8 @@
+import numpy as np
+import cv2
 import os
 import json
-
+import shutil
 
 def convert_bbox_coco_to_yolo(image_width, image_height, bbox):
     """
@@ -87,3 +89,25 @@ def coco_to_yolo(data_dir, output_dir):
 
 
 # if __name__ == "__main__":
+
+
+def resize_with_padding(image, target_size):
+    h, w = image.shape[:2]
+    scale = min(target_size / w, target_size / h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+    # Create a blank canvas (square)
+    padded_image = np.full((target_size, target_size, 3), 128, dtype=np.uint8)
+    x_offset = (target_size - new_w) // 2
+    y_offset = (target_size - new_h) // 2
+    padded_image[y_offset:y_offset+new_h, x_offset:x_offset+new_w] = resized
+
+    return padded_image
+
+
+# # Example usage
+# image = cv2.imread("input_image.jpg")
+# # Choose 640, 1024, etc.
+# square_image = resize_with_padding(image, target_size=640)
+# cv2.imwrite("resized_image.jpg", square_image)
