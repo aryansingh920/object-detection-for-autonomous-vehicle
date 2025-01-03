@@ -35,3 +35,7 @@ yolov8n.pt
 
 src/config/__pycache__
 /__pycache__/
+
+wandb
+
+verified

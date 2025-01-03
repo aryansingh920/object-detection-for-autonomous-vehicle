@@ -3,278 +3,422 @@ Created on 29/12/2024
 
 @author: Aryan
 
-Filename: train_model.py
-
-Relative Path: src/train/train_model.py
+Filename: YOLO_trainer.py
+Relative Path: src/train/YOLO_trainer.py
 """
-import torch
-import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-import yaml
+
 import json
-from pathlib import Path
-import numpy as np
-from typing import Dict, Any, Optional, Tuple
 import logging
-from config.config import YOLOConfig
-from PIL import Image
-import torchvision.transforms as transforms
-import wandb
+from pathlib import Path
+
+import torch
+import torch.optim as optim
+from torch.utils.data import DataLoader
+import torchvision
+from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from tqdm import tqdm
-import os
-import KITTIMultiModal_Dataset as KITTIMultiModalDataset
-import YOLO_model as YOLOModel
+import wandb
+
+from train.YOLO_model import KITTIMultiModalDataset
+from config.config import Config
+
+# 1. Import Mixed Precision Utilities from torch.amp
+from torch.amp import autocast, GradScaler
 
 
-class YOLOTrainer:
-    """YOLO trainer for multi-modal object detection."""
+def get_fasterrcnn_model(num_classes: int):
+    """
+    Returns a Faster R-CNN model, pre-trained on COCO,
+    with a new classification head for num_classes.
+    TorchVision expects num_classes = (# real classes) + 1 for background.
+    """
+    # Load a model pre-trained on COCO
+    model = torchvision.models.detection.fasterrcnn_resnet50_fpn(
+        weights="DEFAULT"
+    )
+    # Get the number of input features for the classifier
+    in_features = model.roi_heads.box_predictor.cls_score.in_features
+    # Replace the pre-trained head
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+    return model
 
-    def __init__(
-        self,
-        config: YOLOConfig,
-        data_dir: Path,
-        output_dir: Path
-    ):
+
+class TorchVisionTrainer:
+    def __init__(self, config: Config):
+        """
+        config should contain:
+        - data_root (Path)
+        - batch_size (int)
+        - num_classes (int)
+        - lr (float)
+        - num_epochs (int)
+        - device (str or 'auto')
+        - use_wandb (bool)
+        - wandb_project_name (str)
+        - patience (int) -> for early stopping
+        - min_delta (float) -> for early stopping
+        - any other relevant hyperparameters
+        """
         self.config = config
-        self.data_dir = Path(data_dir)
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.setup_logging()
-        self.setup_wandb()
 
-        # Initialize model, optimizer, and loss function
-        self.setup_model()
-        self.setup_optimizer()
-        self.setup_loss()
+        # Early Stopping params
+        self.patience = getattr(config, "patience", 5)
+        self.min_delta = getattr(config, "min_delta", 1e-4)
 
-        # Setup data loaders
-        self.setup_data_loaders()
-
-    def setup_logging(self):
-        """Set up logging configuration."""
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(self.output_dir / 'training.log'),
-                logging.StreamHandler()
-            ]
-        )
-        self.logger = logging.getLogger(__name__)
-
-    def setup_wandb(self):
-        """Initialize Weights & Biases for experiment tracking."""
-        wandb.init(
-            project=self.config.defaults.get('wandb_project', 'YOLO-Training'),
-            config=self.config.get_config(),
-            save_code=True
-        )
-        self.logger.info("WandB initialized.")
-
-    def setup_model(self):
-        """Initialize YOLO model with multi-modal support."""
-        # Placeholder for model initialization
-        # Replace YOLOModel with your actual model class
-        self.model = YOLOModel(
-            num_classes=self.config.defaults['num_classes'],
-            modalities=['image', 'calib', 'velodyne']
-        ).to(self.config.defaults['device'])
-        self.logger.info("Model initialized.")
-
-    def setup_optimizer(self):
-        """Set up optimizer and learning rate scheduler."""
-        self.optimizer = torch.optim.Adam(
-            self.model.parameters(),
-            lr=self.config.defaults['learning_rate']
-        )
-        if self.config.defaults.get('scheduler') == 'StepLR':
-            self.scheduler = torch.optim.lr_scheduler.StepLR(
-                self.optimizer,
-                step_size=self.config.defaults.get('step_size', 10),
-                gamma=self.config.defaults.get('gamma', 0.1)
-            )
+        # Device detection
+        if config.device == "auto":
+            if torch.cuda.is_available():
+                self.device = "cuda"
+            elif torch.backends.mps.is_available():
+                self.device = "mps"
+            else:
+                self.device = "cpu"
         else:
-            self.scheduler = None
-        self.logger.info("Optimizer and scheduler set up.")
+            self.device = config.device
 
-    def setup_loss(self):
-        """Set up loss functions for all modalities."""
-        # Placeholder: Use appropriate loss functions for your task
-        self.criterion = nn.CrossEntropyLoss()
-        self.logger.info("Loss function set up.")
+        # AMP & GradScaler setup
+        if self.device == "cuda":
+            self.autocast_enabled = True
+            self.autocast_device = "cuda"
+            self.scaler = GradScaler("cuda")
+        elif self.device == "mps":
+            self.autocast_enabled = False  # Disable AMP for MPS
+            self.scaler = None
+            self.autocast_device = None  # No autocast device for MPS
+        else:
+            self.autocast_enabled = False  # Disable AMP for CPU
+            self.scaler = None
+            self.autocast_device = None
 
-    def setup_data_loaders(self):
-        """Set up data loaders for train and validation sets."""
-        # Create datasets
+        print(f"Using device: {self.device}")
+        if self.device == "mps":
+            logging.warning(
+                "MPS backend is being used. AMP and FP16 are disabled due to limited support.")
+
+        # Logging
+        logging.basicConfig(level=logging.INFO)
+        self.logger = logging.getLogger("train.TorchVisionTrainer")
+
+        # Initialize W&B if configured
+        self.use_wandb = getattr(config, "use_wandb", False)
+        if self.use_wandb:
+            wandb.init(project=config.wandb_project_name)
+            wandb.config.update({
+                "batch_size": config.batch_size,
+                "lr": config.lr,
+                "num_epochs": config.num_epochs,
+                "num_classes": config.num_classes,
+                "device": self.device,
+                "patience": self.patience,
+                "min_delta": self.min_delta,
+            })
+
+        # Dataset setup
         self.train_dataset = KITTIMultiModalDataset(
-            self.data_dir, 'train', self.config
+            coco_dir=config.data_root,
+            split="train",
+            image_size=config.target,
+            num_classes=config.num_classes
         )
         self.val_dataset = KITTIMultiModalDataset(
-            self.data_dir, 'val', self.config
+            coco_dir=config.data_root,
+            split="val",
+            image_size=config.target,
+            num_classes=config.num_classes
         )
 
-        # Create data loaders
         self.train_loader = DataLoader(
             self.train_dataset,
-            batch_size=self.config.defaults['batch_size'],
+            batch_size=config.batch_size,
             shuffle=True,
-            num_workers=self.config.defaults.get('num_workers', 4),
-            pin_memory=True
+            num_workers=4,
+            collate_fn=self.collate_fn
         )
-
         self.val_loader = DataLoader(
             self.val_dataset,
-            batch_size=self.config.defaults['batch_size'],
+            batch_size=config.batch_size,
             shuffle=False,
-            num_workers=self.config.defaults.get('num_workers', 4),
-            pin_memory=True
+            num_workers=0,
+            collate_fn=self.collate_fn
         )
-        self.logger.info("Data loaders set up.")
 
-    def train_epoch(self) -> float:
-        """Train for one epoch."""
+        # Model & Optimizer
+        self.model = get_fasterrcnn_model(config.num_classes).to(self.device)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=config.lr)
+
+    @staticmethod
+    def collate_fn(batch):
+        """
+        TorchVision detection models expect [images, targets] as lists of length B.
+        So we separate them out from the dataset's (image, target) tuples.
+        """
+        images = []
+        targets = []
+        for img, tgt in batch:
+            images.append(img)
+            targets.append(tgt)
+        return images, targets
+
+    def train_one_epoch(self, epoch):
         self.model.train()
-        epoch_loss = 0.0
-        progress_bar = tqdm(self.train_loader, desc='Training', leave=False)
+        total_loss = 0.0
 
-        for batch in progress_bar:
-            images = batch['image'].to(self.config.defaults['device'])
-            calib = batch['calib'].to(self.config.defaults['device'])
-            velodyne = batch['velodyne'].to(self.config.defaults['device'])
-            targets = batch['targets'].to(self.config.defaults['device'])
+        loader = tqdm(
+            self.train_loader,
+            desc=f"Training Epoch {epoch}/{self.config.num_epochs}",
+            leave=False
+        )
+
+        for i, (images, targets) in enumerate(loader):
+            # Move data to the chosen device
+            images = [img.to(self.device) for img in images]
+
+            new_targets = []
+            for t in targets:
+                new_t = {
+                    "boxes": t["boxes"].to(self.device),
+                    "labels": t["labels"].to(self.device),
+                    "image_id": t["image_id"],
+                }
+                new_targets.append(new_t)
+
+            # ------------------
+            # Forward pass (AMP)
+            # ------------------
+            if self.autocast_enabled:
+                with autocast(device_type=self.autocast_device, dtype=torch.float16):
+                    loss_dict = self.model(images, new_targets)
+                    loss = sum(loss for loss in loss_dict.values())
+
+            else:
+                loss_dict = self.model(images, new_targets)
+                loss = sum(loss for loss in loss_dict.values())
+            self.optimizer.zero_grad()
+
+            # -------------------
+            # Backward + Step
+            # -------------------
+            if self.scaler:
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                loss.backward()
+                self.optimizer.step()
+
+            total_loss += loss.item()
+
+            # Log to W&B if needed
+            if self.use_wandb:
+                wandb.log({"train_batch_loss": loss.item()})
+
+            # Update the tqdm progress bar
+            loader.set_postfix({"batch_loss": loss.item()})
+
+            # Optional: print logs every N steps
+            if i % 10 == 0:
+                self.logger.info(
+                    f"[Epoch {epoch}][Step {i}/{len(self.train_loader)}] "
+                    f"Loss: {loss.item():.4f}"
+                )
+
+        avg_loss = total_loss / len(self.train_loader)
+        self.logger.info(f"** Epoch {epoch} Training Loss: {avg_loss:.4f}")
+
+        if self.use_wandb:
+            wandb.log({"train_epoch_loss": avg_loss, "epoch": epoch})
+
+        return avg_loss
+
+    # @torch.no_grad()
+    # def validate(self, epoch):
+    #     self.model.eval()
+    #     total_loss = 0.0
+
+    #     loader = tqdm(
+    #         self.val_loader,
+    #         desc=f"Validation Epoch {epoch}/{self.config.num_epochs}",
+    #         leave=False
+    #     )
+
+    #     for i, (images, targets) in enumerate(loader):
+    #         images = [img.to(self.device) for img in images]
+
+    #         new_targets = []
+    #         for t in targets:
+    #             new_t = {
+    #                 "boxes": t["boxes"].to(self.device),
+    #                 "labels": t["labels"].to(self.device),
+    #                 "image_id": t["image_id"],
+    #             }
+    #             new_targets.append(new_t)
+
+    #         # Validation forward also benefits from autocast
+    #         if self.autocast_enabled:
+    #             with autocast(device_type=self.autocast_device, dtype=torch.float16):
+    #                 loss_dict = self.model(images, new_targets)
+    #                 loss = sum(loss for loss in loss_dict.values())
+
+    #         else:
+    #             loss_dict = self.model(images, new_targets)
+    #             loss = sum(loss for loss in loss_dict.values())
+
+    #         total_loss += loss.item()
+    #         loader.set_postfix({"batch_loss": loss.item()})
+
+    #     avg_val_loss = total_loss / len(self.val_loader)
+    #     self.logger.info(
+    #         f"** Epoch {epoch} Validation Loss: {avg_val_loss:.4f}")
+
+    #     if self.use_wandb:
+    #         wandb.log({"val_loss": avg_val_loss, "epoch": epoch})
+
+    #     return avg_val_loss
+
+
+    @torch.no_grad()
+    def validate(self, epoch):
+        # Temporarily set model to train so it returns losses
+        self.model.train()
+
+        total_loss = 0.0
+        loader = tqdm(
+            self.val_loader, desc=f"Validation Epoch {epoch}/{self.config.num_epochs}", leave=False)
+
+        for i, (images, targets) in enumerate(loader):
+            # Prepare images & targets
+            images = [img.to(self.device) for img in images]
+            new_targets = []
+            for t in targets:
+                new_targets.append({
+                    "boxes": t["boxes"].to(self.device),
+                    "labels": t["labels"].to(self.device),
+                    "image_id": t["image_id"],
+                })
+
+            # Forward pass
+            # model is in train mode
+            loss_dict = self.model(images, new_targets)
+            loss = sum(loss for loss in loss_dict.values())
+
+            total_loss += loss.item()
+            loader.set_postfix({"batch_loss": loss.item()})
+
+        avg_val_loss = total_loss / len(self.val_loader)
+        self.logger.info(
+            f"** Epoch {epoch} Validation Loss: {avg_val_loss:.4f}")
+
+        if self.use_wandb:
+            wandb.log({"val_loss": avg_val_loss, "epoch": epoch})
+
+        # Restore model to eval() if you need it for other inference tasks:
+        self.model.eval()
+
+        return avg_val_loss
+
+
+    def train(self):
+        best_val_loss = float("inf")
+        epochs_no_improve = 0
+
+        for epoch in range(1, self.config.num_epochs + 1):
+            self.logger.info(
+                f"===== EPOCH {epoch} / {self.config.num_epochs} =====")
+            train_loss = self.train_one_epoch(epoch)
+            val_loss = self.validate(epoch)
+
+            # -----------------
+            # Early Stopping
+            # -----------------
+            if val_loss < (best_val_loss - self.min_delta):
+                best_val_loss = val_loss
+                epochs_no_improve = 0
+                self.save_checkpoint(epoch, best=True)
+            else:
+                epochs_no_improve += 1
+
+            if epochs_no_improve >= self.patience:
+                self.logger.info(
+                    f"No improvement for {self.patience} consecutive epochs. Early stopping."
+                )
+                break
+
+    def overfit_on_batch(self, num_steps=100):
+        """
+        Debug function to see if the model can overfit on a single batch
+        (or a small subset) from the DataLoader.
+        """
+        self.model.train()
+
+        # Grab just 1 batch from the loader
+        single_batch = next(iter(self.train_loader))
+        images, targets = single_batch
+
+        images = [img.to(self.device) for img in images]
+        new_targets = []
+        for t in targets:
+            new_t = {
+                "boxes": t["boxes"].to(self.device),
+                "labels": t["labels"].to(self.device),
+                "image_id": t["image_id"],
+            }
+            new_targets.append(new_t)
+
+        for step in range(num_steps):
+            if self.autocast_enabled:
+                with autocast(device_type=self.autocast_device, dtype=torch.float16):
+                    loss_dict = self.model(images, new_targets)
+                    loss = sum(loss for loss in loss_dict.values())
+
+            else:
+                loss_dict = self.model(images, new_targets)
+                loss = sum(loss for loss in loss_dict.values())
 
             self.optimizer.zero_grad()
 
-            # Forward pass
-            outputs = self.model(images, calib, velodyne)
-
-            # Compute loss
-            loss = self.criterion(outputs, targets)
-            loss.backward()
-            self.optimizer.step()
-
-            epoch_loss += loss.item()
-            progress_bar.set_postfix({'Loss': loss.item()})
-
-        avg_loss = epoch_loss / len(self.train_loader)
-        wandb.log({'Train Loss': avg_loss})
-        return avg_loss
-
-    def validate(self) -> float:
-        """Validate the model."""
-        self.model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            progress_bar = tqdm(
-                self.val_loader, desc='Validation', leave=False)
-            for batch in progress_bar:
-                images = batch['image'].to(self.config.defaults['device'])
-                calib = batch['calib'].to(self.config.defaults['device'])
-                velodyne = batch['velodyne'].to(self.config.defaults['device'])
-                targets = batch['targets'].to(self.config.defaults['device'])
-
-                # Forward pass
-                outputs = self.model(images, calib, velodyne)
-
-                # Compute loss
-                loss = self.criterion(outputs, targets)
-                val_loss += loss.item()
-                progress_bar.set_postfix({'Val Loss': loss.item()})
-
-        avg_val_loss = val_loss / len(self.val_loader)
-        wandb.log({'Val Loss': avg_val_loss})
-        return avg_val_loss
-
-    def train(self):
-        """Main training loop."""
-        best_val_loss = float('inf')
-        patience_counter = 0
-
-        for epoch in range(1, self.config.defaults['num_epochs'] + 1):
-            self.logger.info(
-                f"Epoch {epoch}/{self.config.defaults['num_epochs']}"
-            )
-            train_loss = self.train_epoch()
-            val_loss = self.validate()
-
-            # Log metrics
-            self.logger.info(
-                f"Epoch {epoch}/{self.config.defaults['num_epochs']}: "
-                f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}"
-            )
-            wandb.log({
-                'Epoch': epoch,
-                'Train Loss': train_loss,
-                'Val Loss': val_loss
-            })
-
-            # Step the scheduler if available
-            if self.scheduler:
-                self.scheduler.step()
-
-            # Save checkpoint if validation loss improves
-            if val_loss < best_val_loss - self.config.defaults.get('min_delta', 0.0):
-                best_val_loss = val_loss
-                patience_counter = 0
-                self.save_checkpoint(epoch, val_loss, best=True)
+            if self.scaler:
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
             else:
-                patience_counter += 1
+                loss.backward()
+                self.optimizer.step()
 
-            # Early stopping
-            if patience_counter >= self.config.defaults.get('patience', 10):
-                self.logger.info("Early stopping triggered")
-                break
+            # Optionally log
+            if step % 10 == 0:
+                self.logger.info(
+                    f"[Overfit step {step}/{num_steps}] Loss: {loss.item():.4f}"
+                )
 
-        # Save the final model
-        self.save_model()
+    def save_checkpoint(self, epoch, best=False):
+        model_path = Path("output")
+        model_path.mkdir(parents=True, exist_ok=True)
 
-    def save_checkpoint(self, epoch: int, val_loss: float, best: bool = False):
-        """Save model checkpoint."""
-        checkpoint = {
-            'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'val_loss': val_loss,
-            'config': self.config.get_config()
+        # Save model weights
+        fname = (
+            f"{self.config.model_name}.pt"
+            if best
+            else f"{self.config.model_name}_checkpoint_epoch_{epoch}.pt"
+        )
+        torch.save(self.model.state_dict(), model_path / fname)
+        self.logger.info(f"Saved model weights to {model_path / fname}")
+
+        # Save model configuration as JSON
+        json_fname = (
+            f"{self.config.model_name}.json"
+            if best
+            else f"{self.config.model_name}_checkpoint_epoch_{epoch}.json"
+        )
+        model_config = {
+            "epoch": epoch,
+            "best": best,
+            "num_classes": self.config.num_classes,
+            "batch_size": self.config.batch_size,
+            "learning_rate": self.config.lr,
+            "num_epochs": self.config.num_epochs,
+            "device": self.device,
         }
-
-        if best:
-            checkpoint_path = self.output_dir / 'best_checkpoint.pt'
-        else:
-            checkpoint_path = self.output_dir / f'checkpoint_epoch_{epoch}.pt'
-
-        torch.save(checkpoint, checkpoint_path)
-        self.logger.info(f"Saved checkpoint to {checkpoint_path}")
-        wandb.save(str(checkpoint_path))
-
-    def load_checkpoint(self, checkpoint_path: str):
-        """Load model checkpoint."""
-        checkpoint = torch.load(
-            checkpoint_path, map_location=self.config.defaults['device'])
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.logger.info(f"Loaded checkpoint from {checkpoint_path}")
-        return checkpoint['epoch'], checkpoint['val_loss']
-
-    def save_model(self):
-        """Save the final model."""
-        model_path = self.output_dir / 'final_model.pt'
-        torch.save(self.model.state_dict(), model_path)
-        self.logger.info(f"Saved final model to {model_path}")
-        wandb.save(str(model_path))
-
-
-# def main():
-#     # Example usage
-#     config_path = Path('config/config.yaml')  # Update with your config path
-#     config = YOLOConfig(config_path)
-
-#     data_dir = Path('data/coco')
-#     output_dir = Path('outputs')
-
-#     trainer = YOLOTrainer(config, data_dir, output_dir)
-#     trainer.train()
-
-
-# if __name__ == "__main__":
-#     main()
+        with open(model_path / json_fname, "w") as json_file:
+            json.dump(model_config, json_file, indent=4)
+        self.logger.info(
+            f"Saved model configuration to {model_path / json_fname}")
