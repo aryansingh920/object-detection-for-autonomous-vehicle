@@ -51,10 +51,6 @@ def preprocess_datasets():
 def validate_dataset():
     dataset_path = Config.coco_base_path
     for dir in ["train", "val"]:
-        # if not (dataset_path / dir).exists():
-        #     raise FileNotFoundError(
-        #         f"Directory {dir} not found in {dataset_path}")
-        # else:
         validator = DataValidator(dataset_path=dataset_path, split=dir)
         validator.validate_dataset()
         print("Dataset path: ", dataset_path)
@@ -63,11 +59,6 @@ def validate_dataset():
             output_dir=Config.validated_image_path,
             num_images=5
         )
-        # validator.save_random_images_with_bboxes(
-        #     split=dir,
-        #     output_dir=Config.validated_image_path,
-        #     num_images=5
-        # )
 
 
 
