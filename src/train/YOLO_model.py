@@ -1,126 +1,109 @@
-"""
-Created on 31/12/2024
-
-@author: Aryan
-
-Filename: YOLO_model.py
-Relative Path: src/train/YOLO_model.py
-"""
+import os
+import sys
+import json
+import random
+import platform
 
 import torch
-from torch.utils.data import Dataset
-import json
-from pathlib import Path
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+
 from PIL import Image
-import torchvision.transforms as transforms
+import cv2
+import numpy as np
 
-
-class KITTIMultiModalDataset(Dataset):
+class KittiCocoDataset(Dataset):
     """
-    Example dataset for TorchVision's pretrained detection models.
-    Ignores calibration/Velodyne, and just provides bounding boxes + labels.
+    A simple PyTorch Dataset that reads:
+      - {split}_image.json for image paths
+      - {split}_annotations.json for bounding boxes, categories
+    and returns images + target dict that can be used by YOLOv5/YOLOv8 style training.
     """
 
-    def __init__(
-        self,
-        coco_dir: Path,
-        split: str,            # 'train' or 'val'
-        image_size=(640, 640),  # optional resizing
-        num_classes=9          # e.g. 8 KITTI classes + 1 for background
-    ):
-        self.coco_dir = coco_dir
-        self.split = split
-        self.image_size = image_size
-        self.num_classes = num_classes
+    def __init__(self, image_json_path, annotation_json_path, transform=None):
+        super().__init__()
+        self.transform = transform
 
-        # Load the splitted JSON that has images & annotations
-        # e.g. data/coco/train/train_image.json and data/coco/train/train_annotations.json
-        with open(self.coco_dir / split / f"{split}_image.json", "r") as f:
-            self.image_data = json.load(f)
-        with open(self.coco_dir / split / f"{split}_annotations.json", "r") as f:
-            self.ann_data = json.load(f)
+        # Load image info
+        with open(image_json_path, 'r') as f:
+            image_data = json.load(f)
+        self.images = image_data["images"]  # list of dicts
 
-        # Convert list of images, list of annotations, etc.
-        self.images = self.image_data["images"]             # list of dict
-        self.annotations = self.ann_data["annotations"]     # list of dict
+        # Load annotations
+        with open(annotation_json_path, 'r') as f:
+            ann_data = json.load(f)
+        self.categories = ann_data["categories"]
+        annotations = ann_data["annotations"]  # list
 
-        # Build an image_id -> list of annotation dicts
+        # Build a dictionary: image_id -> list of annotations
         self.image_id_to_anns = {}
-        for ann in self.annotations:
+        for ann in annotations:
             img_id = ann["image_id"]
             if img_id not in self.image_id_to_anns:
                 self.image_id_to_anns[img_id] = []
             self.image_id_to_anns[img_id].append(ann)
 
-        # Basic transformations (resize, convert to tensor, etc.)
-        self.transform = transforms.Compose([
-            transforms.Resize(image_size),
-            transforms.ToTensor(),
-        ])
+        # Create a category id -> name map if needed
+        self.cat_id_to_name = {}
+        for cat in self.categories:
+            self.cat_id_to_name[cat["id"]] = cat["name"]
 
     def __len__(self):
         return len(self.images)
 
     def __getitem__(self, idx):
-        """
-        Returns:
-            image (Tensor): CxHxW
-            target (dict): {
-               'boxes': FloatTensor[N, 4],
-               'labels': LongTensor[N],
-               'image_id': tensor([img_id]),
-               ...
-            }
-        """
-        image_info = self.images[idx]
-        img_id = image_info["id"]
-        img_path = image_info["file_name"]  # e.g. 'data/kitti/...png'
+        # Info for this image
+        img_info = self.images[idx]
+        image_id = img_info["id"]
+        img_path = img_info["file_name"]  # Full path stored in the JSON
 
-        # Load and transform the image
-        full_img_path = Path(img_path)
-        image = Image.open(full_img_path).convert("RGB")
-        orig_w, orig_h = image.size
-        image = self.transform(image)  # => CxHxW
+        # Read image (with PIL or OpenCV)
+        try:
+            # Let's do PIL example
+            with Image.open(img_path).convert("RGB") as img:
+                image_np = np.array(img, dtype=np.uint8)
+        except Exception as e:
+            print(f"[WARNING] Failed to open image {img_path}: {e}")
+            # Return a dummy or raise exception
+            raise e
 
-        # Retrieve all annotations for this image
-        anns = self.image_id_to_anns.get(img_id, [])
+        # Convert from HxWxC to a torch tensor: shape [C,H,W]
+        image_tensor = torch.from_numpy(image_np).permute(2, 0, 1).float()
 
+        # Get all bounding boxes + labels
+        ann_list = self.image_id_to_anns.get(image_id, [])
         boxes = []
         labels = []
-        for ann in anns:
-            # ann['bbox'] is [x, y, w, h] in original scale
+        for ann in ann_list:
+            # bbox is [x_min, y_min, width, height]
             x, y, w, h = ann["bbox"]
-            # Convert to [x_min, y_min, x_max, y_max]
-            x_min = x
-            y_min = y
-            x_max = x + w
-            y_max = y + h
+            # YOLO typically uses [x_center, y_center, w, h], normalized
+            # but let's just keep [x_min, y_min, x_max, y_max] for demonstration
+            x2, y2 = x + w, y + h
+            boxes.append([x, y, x2, y2])
+            labels.append(ann["category_id"])
 
-            # We might want to scale these to the new image_size
-            scale_x = self.image_size[0] / orig_w
-            scale_y = self.image_size[1] / orig_h
-            x_min *= scale_x
-            y_min *= scale_y
-            x_max *= scale_x
-            y_max *= scale_y
-
-            # category_id (1..8), TorchVision detection needs 1..(num_classes-1)
-            label = ann["category_id"]  # e.g. 1..8
-            boxes.append([x_min, y_min, x_max, y_max])
-            labels.append(label)
-
-        boxes = torch.tensor(boxes, dtype=torch.float32)
-        labels = torch.tensor(labels, dtype=torch.int64)
-
-        # If no annotations, keep empty placeholders
-        if boxes.shape[0] == 0:
+        if len(boxes) == 0:
+            # If no bounding boxes, create a dummy
             boxes = torch.zeros((0, 4), dtype=torch.float32)
             labels = torch.zeros((0,), dtype=torch.int64)
+        else:
+            boxes = torch.as_tensor(boxes, dtype=torch.float32)
+            labels = torch.as_tensor(labels, dtype=torch.int64)
 
+        # Basic transform if needed
+        if self.transform is not None:
+            # For example, you might do random resizing, flipping, etc.
+            # Here we'll skip for brevity.
+            pass
+
+        # Construct target dictionary
         target = {
-            "boxes": boxes,        # shape [N, 4]
-            "labels": labels,      # shape [N]
-            "image_id": torch.tensor([img_id]),
+            "boxes": boxes,          # shape [N, 4]
+            "labels": labels,        # shape [N]
+            "image_id": torch.tensor([image_id], dtype=torch.int64)
         }
 
-        return image, target
+        return image_tensor, target
+

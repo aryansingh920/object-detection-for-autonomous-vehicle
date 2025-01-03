@@ -6,13 +6,17 @@ Created on 30/12/2024
 Filename: main.py
 Relative Path: src/main.py
 """
+import os
 from pathlib import Path
+
+import torch
 
 from preprocessing.main import KITTIToCOCOConverter
 from preprocessing.validate_dataset import DataValidator
-from train.YOLO_trainer import TorchVisionTrainer
+# from train.YOLO_trainer import main
 from config.config import Config
 
+import argparse
 
 
 
@@ -28,7 +32,7 @@ def main():
 
     # Step 3: Train model if needed
     if Config.train:
-        train_model()
+        train()
 
 
 def preprocess_datasets():
@@ -51,10 +55,6 @@ def preprocess_datasets():
 def validate_dataset():
     dataset_path = Config.coco_base_path
     for dir in ["train", "val"]:
-        # if not (dataset_path / dir).exists():
-        #     raise FileNotFoundError(
-        #         f"Directory {dir} not found in {dataset_path}")
-        # else:
         validator = DataValidator(dataset_path=dataset_path, split=dir)
         validator.validate_dataset()
         print("Dataset path: ", dataset_path)
@@ -63,25 +63,26 @@ def validate_dataset():
             output_dir=Config.validated_image_path,
             num_images=5
         )
-        # validator.save_random_images_with_bboxes(
-        #     split=dir,
-        #     output_dir=Config.validated_image_path,
-        #     num_images=5
-        # )
 
 
-
-
-def train_model():
+def train():
     print("\n=== Step 2: Training Model ===")
-    # Create data_root=Path("data/coco") or use Config.coco_base_path
-    config = Config()
-    # config.data_root = Path(config.coco_base_path)
+    dataset_path = Config.coco_base_path
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument("--train_dir", default="data/coco/train", help="Path to train split directory")
+    # parser.add_argument("--val_dir", default="data/coco/val", help="Path to val split directory")
+    # parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
+    # parser.add_argument("--batch_size", type=int, default=4, help="Mini-batch size")
+    # parser.add_argument("--num_classes", type=int, default=8, help="Number of categories in dataset")
+    # args = parser.parse_args()
 
-    # Build trainer from config
-    trainer = TorchVisionTrainer(config)
-    trainer.overfit_on_batch(num_steps=100)
-    trainer.train()
+    # main(
+    #     train_dir=f"{dataset_path}/train",
+    #     val_dir=f"{dataset_path}/val",
+    #     epochs=1,
+    #     batch_size=2,
+    #     num_classes=9
+    # )
 
 
 if __name__ == "__main__":

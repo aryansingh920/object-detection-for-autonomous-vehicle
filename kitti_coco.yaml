@@ -1,0 +1,12 @@
+names:
+- Car
+- Pedestrian
+- Cyclist
+- Truck
+- Van
+- Person_sitting
+- Tram
+- Misc
+path: /Users/aryansingh/Documents/object-detection-for-autonomous-vehicle
+train: data/coco/train_images
+val: data/coco/val_images

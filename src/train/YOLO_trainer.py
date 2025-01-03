@@ -1,424 +1,271 @@
-"""
-Created on 29/12/2024
-
-@author: Aryan
-
-Filename: YOLO_trainer.py
-Relative Path: src/train/YOLO_trainer.py
-"""
-
+import os
 import json
-import logging
-from pathlib import Path
-
+import yaml
 import torch
-import torch.optim as optim
-from torch.utils.data import DataLoader
-import torchvision
-from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from tqdm import tqdm
-import wandb
+import random
+import shutil
 
-from train.YOLO_model import KITTIMultiModalDataset
-from config.config import Config
+# For YOLOv5
+# from pathlib import Path
+# import sys
+# YOLOV5_REPO_PATH = "/path/to/yolov5"  # If you cloned YOLOv5, set this
+# sys.path.append(str(YOLOV5_REPO_PATH))
+# from models.yolo import Model
+# from train import run as yolov5_train
 
-# 1. Import Mixed Precision Utilities from torch.amp
-from torch.amp import autocast, GradScaler
+# For YOLOv8 (Ultralytics)
+try:
+    from ultralytics import YOLO  # YOLOv8
+except ImportError:
+    YOLO = None
 
 
-def get_fasterrcnn_model(num_classes: int):
+################################################################################
+# 1. Hyperparameter Configuration
+################################################################################
+class HyperParameters:
     """
-    Returns a Faster R-CNN model, pre-trained on COCO,
-    with a new classification head for num_classes.
-    TorchVision expects num_classes = (# real classes) + 1 for background.
+    Holds hyperparameters for the training process.
+    You can expand this class as needed.
     """
-    # Load a model pre-trained on COCO
-    model = torchvision.models.detection.fasterrcnn_resnet50_fpn(
-        weights="DEFAULT"
+
+    def __init__(self,
+                 model_name: str = "yolov8n.pt",  # or "yolov5s.pt"
+                 epochs: int = 1,
+                 batch_size: int = 4,
+                 # single int or (width, height)
+                 image_size: int = (1242, 375),
+                 lr: float = 0.01,
+                 ):
+        self.model_name = model_name
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.image_size = image_size
+        self.lr = lr  # We'll feed this into lr0 for YOLOv8
+
+
+################################################################################
+# 2. Device Selection (CPU, CUDA, MPS)
+################################################################################
+def auto_select_device():
+    """
+    Automatically select the best available device.
+    Checks for:
+      1. MPS (Mac M1/M2) if available and built,
+         but if MPS performance is slow or not stable,
+         we can fallback to CPU for certain operations.
+      2. CUDA if available.
+      3. Otherwise CPU.
+    Returns a string usable by PyTorch (e.g., 'mps', 'cuda:0', or 'cpu').
+    """
+    # 1. Try MPS
+    if torch.backends.mps.is_available() and torch.backends.mps.is_built():
+        return "mps"
+
+    # 2. Try CUDA
+    if torch.cuda.is_available():
+        return "cuda"
+
+    # 3. Fallback CPU
+    return "cpu"
+
+
+################################################################################
+# 3. Build YOLO Data YAML
+################################################################################
+def build_yolo_data_yaml(
+        train_images_dir: str,
+        val_images_dir: str,
+        categories: list,
+        yaml_path: str = "kitti_coco.yaml"
+):
+    """
+    Creates a YOLO-style .yaml file that points to your train/val image directories
+    and lists your class names. Saves it to `yaml_path`.
+
+    YOLO expects something like:
+
+    names:
+      - class0
+      - class1
+      ...
+    path:
+      train: /path/to/train/images
+      val:   /path/to/val/images
+    """
+    # Extract category names sorted by ID to maintain consistent indexing
+    sorted_cats = sorted(categories, key=lambda c: c["id"])
+    names = [c["name"] for c in sorted_cats]
+
+    data_yaml = {
+        "path": os.getcwd(),
+        "train": train_images_dir,
+        "val": val_images_dir,
+        "names": names
+    }
+
+    with open(yaml_path, "w") as f:
+        yaml.dump(data_yaml, f)
+
+    return yaml_path
+
+
+################################################################################
+# 4. Dataset Helper (to parse COCO-like JSONs, if needed by YOLO training)
+################################################################################
+def extract_image_paths_from_json(json_file):
+    """
+    Given *_image.json in COCO format:
+    {
+      "images": [
+        {
+          "id": 1,
+          "file_name": "...",
+          "width": 1280,
+          "height": 720,
+          ...
+        },
+        ...
+      ]
+    }
+    We return a list of file paths.
+    """
+    with open(json_file, "r") as f:
+        data = json.load(f)
+    images = data.get("images", [])
+    return [img["file_name"] for img in images]
+
+
+################################################################################
+# 5. Training Function (using YOLOv8 or YOLOv5)
+################################################################################
+def train_yolo_model(
+        config: HyperParameters,
+        train_json_image: str = "data/coco/train/train_image.json",
+        val_json_image: str = "data/coco/val/val_image.json",
+        train_json_annot: str = "data/coco/train/train_annotations.json",
+        val_json_annot: str = "data/coco/val/val_annotations.json",
+        categories: list = None,
+):
+    """
+    Main function to train YOLO (v5 or v8).
+    For YOLOv8, we use Ultralytics' API.
+    For YOLOv5, we'd typically call the train.py script or import its functions.
+    """
+
+    # 1. Auto-select device
+    device = auto_select_device()
+    print(f"Using device: {device}")
+
+    # 2. If categories are not passed, load them from JSON:
+    if categories is None:
+        with open(train_json_annot, "r") as f:
+            train_data = json.load(f)
+        categories = train_data["categories"]
+        print("Loaded categories from train_annotations.json.")
+
+    # 3. Build the data.yaml for YOLO
+    train_paths = extract_image_paths_from_json(train_json_image)
+    val_paths = extract_image_paths_from_json(val_json_image)
+
+    train_folder = os.path.join("data", "coco", "train_images")
+    val_folder = os.path.join("data", "coco", "val_images")
+    os.makedirs(train_folder, exist_ok=True)
+    os.makedirs(val_folder, exist_ok=True)
+
+    def symlink_or_copy_images(img_paths, out_folder):
+        for img_path in img_paths:
+            filename = os.path.basename(img_path)
+            src = os.path.abspath(img_path)
+            dst = os.path.join(out_folder, filename)
+            if not os.path.exists(dst):
+                try:
+                    os.symlink(src, dst)
+                except:
+                    shutil.copy2(src, dst)
+
+    print("Preparing training images...")
+    symlink_or_copy_images(train_paths, train_folder)
+
+    print("Preparing validation images...")
+    symlink_or_copy_images(val_paths, val_folder)
+
+    yaml_file_path = build_yolo_data_yaml(
+        train_images_dir=train_folder,
+        val_images_dir=val_folder,
+        categories=categories,
+        yaml_path="kitti_coco.yaml"
     )
-    # Get the number of input features for the classifier
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
-    # Replace the pre-trained head
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
-    return model
 
+    # 4. Print out the data.yaml content (Optional)
+    with open(yaml_file_path, "r") as f:
+        data_yaml_text = f.read()
+    print("Data YAML:\n", data_yaml_text)
 
-class TorchVisionTrainer:
-    def __init__(self, config: Config):
-        """
-        config should contain:
-        - data_root (Path)
-        - batch_size (int)
-        - num_classes (int)
-        - lr (float)
-        - num_epochs (int)
-        - device (str or 'auto')
-        - use_wandb (bool)
-        - wandb_project_name (str)
-        - patience (int) -> for early stopping
-        - min_delta (float) -> for early stopping
-        - any other relevant hyperparameters
-        """
-        self.config = config
-
-        # Early Stopping params
-        self.patience = getattr(config, "patience", 5)
-        self.min_delta = getattr(config, "min_delta", 1e-4)
-
-        # Device detection
-        if config.device == "auto":
-            if torch.cuda.is_available():
-                self.device = "cuda"
-            elif torch.backends.mps.is_available():
-                self.device = "mps"
-            else:
-                self.device = "cpu"
-        else:
-            self.device = config.device
-
-        # AMP & GradScaler setup
-        if self.device == "cuda":
-            self.autocast_enabled = True
-            self.autocast_device = "cuda"
-            self.scaler = GradScaler("cuda")
-        elif self.device == "mps":
-            self.autocast_enabled = False  # Disable AMP for MPS
-            self.scaler = None
-            self.autocast_device = None  # No autocast device for MPS
-        else:
-            self.autocast_enabled = False  # Disable AMP for CPU
-            self.scaler = None
-            self.autocast_device = None
-
-        print(f"Using device: {self.device}")
-        if self.device == "mps":
-            logging.warning(
-                "MPS backend is being used. AMP and FP16 are disabled due to limited support.")
-
-        # Logging
-        logging.basicConfig(level=logging.INFO)
-        self.logger = logging.getLogger("train.TorchVisionTrainer")
-
-        # Initialize W&B if configured
-        self.use_wandb = getattr(config, "use_wandb", False)
-        if self.use_wandb:
-            wandb.init(project=config.wandb_project_name)
-            wandb.config.update({
-                "batch_size": config.batch_size,
-                "lr": config.lr,
-                "num_epochs": config.num_epochs,
-                "num_classes": config.num_classes,
-                "device": self.device,
-                "patience": self.patience,
-                "min_delta": self.min_delta,
-            })
-
-        # Dataset setup
-        self.train_dataset = KITTIMultiModalDataset(
-            coco_dir=config.data_root,
-            split="train",
-            image_size=config.target,
-            num_classes=config.num_classes
+    # 5. Train with YOLOv8 or YOLOv5
+    if YOLO is not None:
+        print(f"Starting training with YOLOv8 model: {config.model_name}")
+        model = YOLO(config.model_name)
+        # For YOLOv8, the initial learning rate is 'lr0'
+        results = model.train(
+            data=yaml_file_path,
+            epochs=config.epochs,
+            batch=config.batch_size,
+            imgsz=config.image_size,     # single int or list of int
+            lr0=config.lr,               # <--- Use lr0 instead of lr
+            device=device,
+            name="kitti_coco_yolov8_experiment"
         )
-        self.val_dataset = KITTIMultiModalDataset(
-            coco_dir=config.data_root,
-            split="val",
-            image_size=config.target,
-            num_classes=config.num_classes
-        )
-
-        self.train_loader = DataLoader(
-            self.train_dataset,
-            batch_size=config.batch_size,
-            shuffle=True,
-            num_workers=4,
-            collate_fn=self.collate_fn
-        )
-        self.val_loader = DataLoader(
-            self.val_dataset,
-            batch_size=config.batch_size,
-            shuffle=False,
-            num_workers=0,
-            collate_fn=self.collate_fn
-        )
-
-        # Model & Optimizer
-        self.model = get_fasterrcnn_model(config.num_classes).to(self.device)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=config.lr)
-
-    @staticmethod
-    def collate_fn(batch):
-        """
-        TorchVision detection models expect [images, targets] as lists of length B.
-        So we separate them out from the dataset's (image, target) tuples.
-        """
-        images = []
-        targets = []
-        for img, tgt in batch:
-            images.append(img)
-            targets.append(tgt)
-        return images, targets
-
-    def train_one_epoch(self, epoch):
-        self.model.train()
-        total_loss = 0.0
-
-        loader = tqdm(
-            self.train_loader,
-            desc=f"Training Epoch {epoch}/{self.config.num_epochs}",
-            leave=False
-        )
-
-        for i, (images, targets) in enumerate(loader):
-            # Move data to the chosen device
-            images = [img.to(self.device) for img in images]
-
-            new_targets = []
-            for t in targets:
-                new_t = {
-                    "boxes": t["boxes"].to(self.device),
-                    "labels": t["labels"].to(self.device),
-                    "image_id": t["image_id"],
-                }
-                new_targets.append(new_t)
-
-            # ------------------
-            # Forward pass (AMP)
-            # ------------------
-            if self.autocast_enabled:
-                with autocast(device_type=self.autocast_device, dtype=torch.float16):
-                    loss_dict = self.model(images, new_targets)
-                    loss = sum(loss for loss in loss_dict.values())
-
-            else:
-                loss_dict = self.model(images, new_targets)
-                loss = sum(loss for loss in loss_dict.values())
-            self.optimizer.zero_grad()
-
-            # -------------------
-            # Backward + Step
-            # -------------------
-            if self.scaler:
-                self.scaler.scale(loss).backward()
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                loss.backward()
-                self.optimizer.step()
-
-            total_loss += loss.item()
-
-            # Log to W&B if needed
-            if self.use_wandb:
-                wandb.log({"train_batch_loss": loss.item()})
-
-            # Update the tqdm progress bar
-            loader.set_postfix({"batch_loss": loss.item()})
-
-            # Optional: print logs every N steps
-            if i % 10 == 0:
-                self.logger.info(
-                    f"[Epoch {epoch}][Step {i}/{len(self.train_loader)}] "
-                    f"Loss: {loss.item():.4f}"
-                )
-
-        avg_loss = total_loss / len(self.train_loader)
-        self.logger.info(f"** Epoch {epoch} Training Loss: {avg_loss:.4f}")
-
-        if self.use_wandb:
-            wandb.log({"train_epoch_loss": avg_loss, "epoch": epoch})
-
-        return avg_loss
-
-    # @torch.no_grad()
-    # def validate(self, epoch):
-    #     self.model.eval()
-    #     total_loss = 0.0
-
-    #     loader = tqdm(
-    #         self.val_loader,
-    #         desc=f"Validation Epoch {epoch}/{self.config.num_epochs}",
-    #         leave=False
-    #     )
-
-    #     for i, (images, targets) in enumerate(loader):
-    #         images = [img.to(self.device) for img in images]
-
-    #         new_targets = []
-    #         for t in targets:
-    #             new_t = {
-    #                 "boxes": t["boxes"].to(self.device),
-    #                 "labels": t["labels"].to(self.device),
-    #                 "image_id": t["image_id"],
-    #             }
-    #             new_targets.append(new_t)
-
-    #         # Validation forward also benefits from autocast
-    #         if self.autocast_enabled:
-    #             with autocast(device_type=self.autocast_device, dtype=torch.float16):
-    #                 loss_dict = self.model(images, new_targets)
-    #                 loss = sum(loss for loss in loss_dict.values())
-
-    #         else:
-    #             loss_dict = self.model(images, new_targets)
-    #             loss = sum(loss for loss in loss_dict.values())
-
-    #         total_loss += loss.item()
-    #         loader.set_postfix({"batch_loss": loss.item()})
-
-    #     avg_val_loss = total_loss / len(self.val_loader)
-    #     self.logger.info(
-    #         f"** Epoch {epoch} Validation Loss: {avg_val_loss:.4f}")
-
-    #     if self.use_wandb:
-    #         wandb.log({"val_loss": avg_val_loss, "epoch": epoch})
-
-    #     return avg_val_loss
+        print("Training complete. Results:", results)
+        # The best model is saved in 'runs/detect/kitti_coco_yolov8_experiment/weights/best.pt' by default.
+    else:
+        # YOLOv5 approach (commented out by default)
+        raise RuntimeError(
+            "Ultralytics YOLO (yolov8) is not installed, and YOLOv5 code is commented out.")
 
 
-    @torch.no_grad()
-    def validate(self, epoch):
-        # Temporarily set model to train so it returns losses
-        self.model.train()
+################################################################################
+# 6. Example Main
+################################################################################
+if __name__ == "__main__":
+    """
+    Example usage. You can adapt this to your own CLI or script invocation.
+    """
+    # 1. Define your hyperparameters
+    config = HyperParameters(
+        model_name="yolov8n.pt",  # or "yolov5s.pt"
+        epochs=10,
+        batch_size=4,
+        image_size=640,  # single int
+        lr=0.001,        # initial LR -> becomes lr0 in YOLOv8
+    )
 
-        total_loss = 0.0
-        loader = tqdm(
-            self.val_loader, desc=f"Validation Epoch {epoch}/{self.config.num_epochs}", leave=False)
+    # 2. Set your JSON paths
+    train_json_image = "data/coco/train/train_image.json"
+    val_json_image = "data/coco/val/val_image.json"
+    train_json_annot = "data/coco/train/train_annotations.json"
+    val_json_annot = "data/coco/val/val_annotations.json"
 
-        for i, (images, targets) in enumerate(loader):
-            # Prepare images & targets
-            images = [img.to(self.device) for img in images]
-            new_targets = []
-            for t in targets:
-                new_targets.append({
-                    "boxes": t["boxes"].to(self.device),
-                    "labels": t["labels"].to(self.device),
-                    "image_id": t["image_id"],
-                })
+    # 3. You can provide categories directly or let the script load them
+    categories = [
+        {"id": 1, "name": "Car"},
+        {"id": 2, "name": "Pedestrian"},
+        {"id": 3, "name": "Cyclist"},
+        {"id": 4, "name": "Truck"},
+        {"id": 5, "name": "Van"},
+        {"id": 6, "name": "Person_sitting"},
+        {"id": 7, "name": "Tram"},
+        {"id": 8, "name": "Misc"}
+    ]
 
-            # Forward pass
-            # model is in train mode
-            loss_dict = self.model(images, new_targets)
-            loss = sum(loss for loss in loss_dict.values())
+    # 4. Train the model
+    train_yolo_model(
+        config=config,
+        train_json_image=train_json_image,
+        val_json_image=val_json_image,
+        train_json_annot=train_json_annot,
+        val_json_annot=val_json_annot,
+        categories=categories
+    )
 
-            total_loss += loss.item()
-            loader.set_postfix({"batch_loss": loss.item()})
-
-        avg_val_loss = total_loss / len(self.val_loader)
-        self.logger.info(
-            f"** Epoch {epoch} Validation Loss: {avg_val_loss:.4f}")
-
-        if self.use_wandb:
-            wandb.log({"val_loss": avg_val_loss, "epoch": epoch})
-
-        # Restore model to eval() if you need it for other inference tasks:
-        self.model.eval()
-
-        return avg_val_loss
-
-
-    def train(self):
-        best_val_loss = float("inf")
-        epochs_no_improve = 0
-
-        for epoch in range(1, self.config.num_epochs + 1):
-            self.logger.info(
-                f"===== EPOCH {epoch} / {self.config.num_epochs} =====")
-            train_loss = self.train_one_epoch(epoch)
-            val_loss = self.validate(epoch)
-
-            # -----------------
-            # Early Stopping
-            # -----------------
-            if val_loss < (best_val_loss - self.min_delta):
-                best_val_loss = val_loss
-                epochs_no_improve = 0
-                self.save_checkpoint(epoch, best=True)
-            else:
-                epochs_no_improve += 1
-
-            if epochs_no_improve >= self.patience:
-                self.logger.info(
-                    f"No improvement for {self.patience} consecutive epochs. Early stopping."
-                )
-                break
-
-    def overfit_on_batch(self, num_steps=100):
-        """
-        Debug function to see if the model can overfit on a single batch
-        (or a small subset) from the DataLoader.
-        """
-        self.model.train()
-
-        # Grab just 1 batch from the loader
-        single_batch = next(iter(self.train_loader))
-        images, targets = single_batch
-
-        images = [img.to(self.device) for img in images]
-        new_targets = []
-        for t in targets:
-            new_t = {
-                "boxes": t["boxes"].to(self.device),
-                "labels": t["labels"].to(self.device),
-                "image_id": t["image_id"],
-            }
-            new_targets.append(new_t)
-
-        for step in range(num_steps):
-            if self.autocast_enabled:
-                with autocast(device_type=self.autocast_device, dtype=torch.float16):
-                    loss_dict = self.model(images, new_targets)
-                    loss = sum(loss for loss in loss_dict.values())
-
-            else:
-                loss_dict = self.model(images, new_targets)
-                loss = sum(loss for loss in loss_dict.values())
-
-            self.optimizer.zero_grad()
-
-            if self.scaler:
-                self.scaler.scale(loss).backward()
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                loss.backward()
-                self.optimizer.step()
-
-            # Optionally log
-            if step % 10 == 0:
-                self.logger.info(
-                    f"[Overfit step {step}/{num_steps}] Loss: {loss.item():.4f}"
-                )
-
-    def save_checkpoint(self, epoch, best=False):
-        model_path = Path("output")
-        model_path.mkdir(parents=True, exist_ok=True)
-
-        # Save model weights
-        fname = (
-            f"{self.config.model_name}.pt"
-            if best
-            else f"{self.config.model_name}_checkpoint_epoch_{epoch}.pt"
-        )
-        torch.save(self.model.state_dict(), model_path / fname)
-        self.logger.info(f"Saved model weights to {model_path / fname}")
-
-        # Save model configuration as JSON
-        json_fname = (
-            f"{self.config.model_name}.json"
-            if best
-            else f"{self.config.model_name}_checkpoint_epoch_{epoch}.json"
-        )
-        model_config = {
-            "epoch": epoch,
-            "best": best,
-            "num_classes": self.config.num_classes,
-            "batch_size": self.config.batch_size,
-            "learning_rate": self.config.lr,
-            "num_epochs": self.config.num_epochs,
-            "device": self.device,
-        }
-        with open(model_path / json_fname, "w") as json_file:
-            json.dump(model_config, json_file, indent=4)
-        self.logger.info(
-            f"Saved model configuration to {model_path / json_fname}")
+    print("All done!")
