@@ -30,7 +30,7 @@ class HyperParameters:
     """
 
     def __init__(self,
-                 model_name: str = "yolov8n.pt",  # or "yolov5s.pt"
+                 model_name: str = "models/yolov8n.pt",  # or "yolov5s.pt"
                  epochs: int = 1,
                  batch_size: int = 4,
                  # single int or (width, height)
@@ -77,7 +77,7 @@ def build_yolo_data_yaml(
         train_images_dir: str,
         val_images_dir: str,
         categories: list,
-        yaml_path: str = "kitti_coco.yaml"
+        yaml_path: str = "data/kitti_coco.yaml"
 ):
     """
     Creates a YOLO-style .yaml file that points to your train/val image directories
@@ -194,7 +194,7 @@ def train_yolo_model(
         train_images_dir=train_folder,
         val_images_dir=val_folder,
         categories=categories,
-        yaml_path="kitti_coco.yaml"
+        yaml_path="data/kitti_coco.yaml"
     )
 
     # 4. Print out the data.yaml content (Optional)
@@ -233,7 +233,7 @@ if __name__ == "__main__":
     """
     # 1. Define your hyperparameters
     config = HyperParameters(
-        model_name="yolov8n.pt",  # or "yolov5s.pt"
+        model_name="model/yolov8n.pt",  # or "yolov5s.pt"
         epochs=10,
         batch_size=4,
         image_size=640,  # single int

@@ -20,6 +20,7 @@ class Config:
 
     kitti_base_path = "data/kitti"
     coco_base_path = "data/coco"
+    yolo_base_path = "data/yolo"
     validated_image_path = "verified"
     output = "output"
     data_root = Path(coco_base_path)

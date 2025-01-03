@@ -13,6 +13,7 @@ import torch
 
 from preprocessing.main import KITTIToCOCOConverter
 from preprocessing.validate_dataset import DataValidator
+from preprocessing.coco_to_yolo import coco_to_yolo
 # from train.YOLO_trainer import main
 from config.config import Config
 
@@ -50,6 +51,10 @@ def preprocess_datasets():
             target_size=Config.target_size_for_normalization
         )
     converter.save_data()
+
+    data_dir = Config.coco_base_path
+    output_dir = Config.yolo_base_path
+    coco_to_yolo(data_dir, output_dir)
 
 
 def validate_dataset():

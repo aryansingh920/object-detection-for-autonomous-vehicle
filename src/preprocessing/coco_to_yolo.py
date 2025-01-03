@@ -24,10 +24,13 @@ def coco_to_yolo(data_dir, output_dir):
 
     for split in ["train", "val", "test"]:
         coco_split_dir = os.path.join(data_dir, split)
-        yolo_split_dir = os.path.join(output_dir, split)
+        yolo_images_dir = os.path.join(output_dir, split, "images")
+        yolo_labels_dir = os.path.join(output_dir, split, "labels")
 
-        if not os.path.exists(yolo_split_dir):
-            os.makedirs(yolo_split_dir)
+        if not os.path.exists(yolo_images_dir):
+            os.makedirs(yolo_images_dir)
+        if not os.path.exists(yolo_labels_dir):
+            os.makedirs(yolo_labels_dir)
 
         # Load image and annotation files
         image_file = os.path.join(coco_split_dir, f"{split}_image.json")
@@ -63,7 +66,7 @@ def coco_to_yolo(data_dir, output_dir):
 
             # YOLO annotation file path
             yolo_annotation_file = os.path.join(
-                yolo_split_dir, os.path.splitext(img_file)[0] + ".txt"
+                yolo_labels_dir, os.path.splitext(img_file)[0] + ".txt"
             )
 
             # Convert COCO bbox to YOLO format
@@ -74,15 +77,13 @@ def coco_to_yolo(data_dir, output_dir):
                 yolo_bbox_str = " ".join(map(str, yolo_bbox))
                 yolo_file.write(f"{category_id} {yolo_bbox_str}\n")
 
-            # Copy the image file to the YOLO directory
+            # Copy the image file to the YOLO images directory
             img_src_path = image_details["file_name"]
-            img_dst_path = os.path.join(yolo_split_dir, img_file)
+            img_dst_path = os.path.join(yolo_images_dir, img_file)
             if not os.path.exists(img_dst_path):
                 os.makedirs(os.path.dirname(img_dst_path), exist_ok=True)
-                os.rename(img_src_path, img_dst_path)
+                shutil.copy(img_src_path, img_dst_path)
+                # os.rename(img_src_path, img_dst_path)
 
 
-if __name__ == "__main__":
-    data_dir = "data/coco"
-    output_dir = "data/yolo"
-    coco_to_yolo(data_dir, output_dir)
+# if __name__ == "__main__":
