@@ -13,7 +13,7 @@ from pathlib import Path
 
 class Config:
     # General
-    preprocess = False          # Whether to run the preprocessing
+    preprocess = True          # Whether to run the preprocessing
     normalize = False           # Whether to normalize the dataset
     validate = True             # Whether to run validation
     train = False                # Whether to run training
