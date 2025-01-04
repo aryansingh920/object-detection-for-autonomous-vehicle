@@ -1,41 +1,21 @@
-"""
-Created on 03/01/2025
-
-@author: Aryan
-
-Filename: realtime.py
-Relative Path: src/realtime/realtime.py
-
-Description:
-    Displays a sequence of images as a video, with optional YOLOv8 predictions.
-    If a `timestamps.txt` file is provided, it overlays the timestamp on each frame.
-
-Usage Example:
-    # Check the sequence without predictions, with timestamps
-    python3.10 src/realtime/main.py \
-        --images_folder data/kitti/raw_Data/2011_09_26/2011_09_26_drive_0032_sync/image_00/data \
-        --timestamps data/kitti/raw_Data/2011_09_26/2011_09_26_drive_0032_sync/image_00/timestamps.txt \
-        --fps 15 \
-        --check_sequence
-
-    # Run YOLOv8 inference with timestamps
-    python realtime.py \
-        --weights models/custom/my_model_final.pt \
-        --images_folder data/kitti/raw_Data/2011_09_26/2011_09_26_drive_0032_sync/image_00/data \
-        --timestamps data/kitti/raw_Data/2011_09_26/2011_09_26_drive_0032_sync/image_00/timestamps.txt \
-        --fps 30
-"""
-
 import argparse
 import os
 import cv2
+from ultralytics import YOLO
+
+CLASS_MAP = {
+    0: "Car",
+    1: "Pedestrian",
+    2: "Cyclist",
+    3: "Truck",
+    4: "Van",
+    5: "Person_sitting",
+    6: "Tram",
+    7: "Misc",
+}
 
 
 def load_timestamps(timestamps_path):
-    """
-    Load timestamps from a file into a list.
-    Each line in the file is treated as a separate timestamp.
-    """
     with open(timestamps_path, "r") as f:
         timestamps = [line.strip() for line in f.readlines()]
     print(
@@ -44,16 +24,6 @@ def load_timestamps(timestamps_path):
 
 
 def overlay_timestamp(image, timestamp, position=(5, 15), font_scale=0.5, color=(0, 0, 0), thickness=1):
-    """
-    Overlay a timestamp on the given image.
-    :param image: Input image (numpy array).
-    :param timestamp: String timestamp to overlay.
-    :param position: Position (x, y) for the text.
-    :param font_scale: Font size.
-    :param color: Text color in BGR format.
-    :param thickness: Thickness of the text.
-    :return: Image with timestamp overlaid.
-    """
     cv2.putText(
         image,
         timestamp,
@@ -68,9 +38,6 @@ def overlay_timestamp(image, timestamp, position=(5, 15), font_scale=0.5, color=
 
 
 def check_image_sequence(images_folder, timestamps, fps):
-    """
-    Display images with timestamps in a folder without predictions.
-    """
     image_files = sorted([
         os.path.join(images_folder, f)
         for f in os.listdir(images_folder)
@@ -97,9 +64,9 @@ def check_image_sequence(images_folder, timestamps, fps):
                 print(f"[WARN] Could not read image: {img_path}")
                 continue
 
-            # Overlay timestamp if available
             if timestamps and i < len(timestamps):
-                frame = overlay_timestamp(frame, timestamps[i])
+                frame_with_boxes = overlay_timestamp(
+                    frame_with_boxes, timestamps[i])
 
             cv2.imshow("Sequence Check (No Predictions)", frame)
 
@@ -110,11 +77,6 @@ def check_image_sequence(images_folder, timestamps, fps):
 
 
 def realtime_inference(weights_path, images_folder, timestamps, fps):
-    """
-    Run YOLOv8 inference on a folder of sequential images with optional timestamps.
-    """
-    from ultralytics import YOLO
-
     model = YOLO(weights_path)
     print(f"[INFO] Loaded YOLOv8 model from: {weights_path}")
 
@@ -144,29 +106,30 @@ def realtime_inference(weights_path, images_folder, timestamps, fps):
                 print(f"[WARN] Could not read image: {img_path}")
                 continue
 
-            # Perform inference
             results_list = model.predict(frame)
             results = results_list[0]
 
-            # Draw bounding boxes
+            frame_with_boxes = frame.copy()
+
             for box in results.boxes:
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
                 conf = float(box.conf[0])
                 cls_id = int(box.cls[0])
 
-                label = f"ID:{cls_id} Conf:{conf:.2f}"
+                label = f"{CLASS_MAP.get(cls_id, 'Unknown')} Conf:{conf:.2f}"
                 color = (0, 255, 0)
-                cv2.rectangle(frame, (int(x1), int(y1)),
+                cv2.rectangle(frame_with_boxes, (int(x1), int(y1)),
                               (int(x2), int(y2)), color, 2)
-                cv2.putText(frame, label, (int(x1), int(y1) - 5),
+                cv2.putText(frame_with_boxes, label, (int(x1), int(y1) - 5),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
-            # Overlay timestamp if available
             if timestamps and i < len(timestamps):
-                frame = overlay_timestamp(frame, timestamps[i])
+                frame_with_boxes = overlay_timestamp(
+                    frame_with_boxes, timestamps[i])
 
-            # Display the frame
-            cv2.imshow("YOLOv8 Real-Time Inference", frame)
+            combined_frame = cv2.vconcat([frame, frame_with_boxes])
+
+            cv2.imshow("YOLOv8 Real-Time Inference", combined_frame)
 
             if cv2.waitKey(delay_between_frames) & 0xFF == ord('q'):
                 print("[INFO] Quitting real-time display...")
@@ -190,7 +153,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Load timestamps if provided
     timestamps = None
     if args.timestamps:
         timestamps = load_timestamps(args.timestamps)
