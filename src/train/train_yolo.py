@@ -5,7 +5,7 @@ Created on 03/01/2025
 
 Filename: train_yolo.py
 
-Relative Path: src/train/train_yolov8.py
+Relative Path: src/train/train_yolo.py
 """
 import torch
 from ultralytics import YOLO

@@ -1,86 +1,129 @@
 """
-Created on 29/12/2024
+Created on 03/01/2025
 
 @author: Aryan
 
-Filename: __main__.py
+Filename: realtime.py
+Relative Path: src/realtime/realtime.py
 
-Relative Path: src/realtime/__main__.py
+Description:
+    This script takes a folder of sequential images, feeds each image (frame) to a 
+    trained YOLOv8 model, obtains bounding boxes, and displays the results in a window.
+    When played rapidly (e.g., 30 fps), it simulates real-time video inference.
+
+Usage Example:
+    python realtime.py --weights models/custom/my_model_final.pt \
+                       --images_folder data/images/sequence \
+                       --fps 30
 """
 
+import argparse
+import os
+import time
 import cv2
 from ultralytics import YOLO
-import os
-
-# If you have a Config class with paths, import it (optional).
-# from src.config import Config
 
 
-def run_realtime_inference(video_source, model_weights, display_window=True):
+def draw_boxes_on_image(image, results):
     """
-    Runs real-time (or near real-time) object detection inference on a video source.
-    
-    :param video_source: Can be a path to a video file or an integer (e.g., 0) for a webcam.
-    :param model_weights: Path to the trained YOLO weights (e.g., 'best.pt').
-    :param display_window: Whether to display the frames in an OpenCV window.
+    Draw bounding boxes on the input image using YOLOv8 detection results.
     """
-    # 1. Load the trained YOLO model
-    print(f"Loading YOLO model from: {model_weights}")
-    model = YOLO(model_weights)
+    for box in results.boxes:
+        x1, y1, x2, y2 = box.xyxy[0].tolist()
+        conf = float(box.conf[0])
+        cls_id = int(box.cls[0])
 
-    # 2. Open the video source
-    cap = cv2.VideoCapture(video_source)
-    if not cap.isOpened():
-        raise IOError(f"Could not open video source: {video_source}")
+        label = f"ID:{cls_id} Conf:{conf:.2f}"
 
-    # Optional: set video resolution or FPS if needed
-    # cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    # cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-    # cap.set(cv2.CAP_PROP_FPS, 30)
+        color = (0, 255, 0)  # BGR format
+        thickness = 2
+        cv2.rectangle(image, (int(x1), int(y1)),
+                      (int(x2), int(y2)), color, thickness)
+        cv2.putText(
+            image,
+            label,
+            (int(x1), int(y1) - 5),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            color,
+            1,
+            cv2.LINE_AA
+        )
+    return image
 
-    print("Starting inference. Press 'q' to quit.")
+
+def main(weights_path: str, images_folder: str, fps: int):
+    """
+    Main function for reading sequential images and displaying YOLOv8 real-time inference.
+    :param weights_path: Path to the trained YOLOv8 weights file
+    :param images_folder: Folder containing sequential images
+    :param fps: Frames per second for simulated real-time display
+    """
+    # 1. Load the YOLOv8 model
+    model = YOLO(weights_path)
+    print(f"[INFO] Loaded YOLOv8 model from: {weights_path}")
+
+    # 2. Read all image file names from the folder
+    #    Sort them by name so that they appear in the correct sequence
+    image_files = sorted([
+        os.path.join(images_folder, f)
+        for f in os.listdir(images_folder)
+        if f.lower().endswith((".jpg", ".png", ".jpeg", ".bmp"))
+    ])
+
+    if not image_files:
+        print(f"[ERROR] No images found in {images_folder}")
+        return
+
+    print(f"[INFO] Found {len(image_files)} images in folder: {images_folder}")
+
+    # 3. Calculate the delay between frames (in milliseconds) for display
+    #    1000 ms / fps
+    delay_between_frames = int(1000 / fps)
+
+    # 4. Loop through images repeatedly (you can remove `while True` if you only want one pass)
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("End of video or cannot fetch the frame.")
-            break
+        for img_path in image_files:
+            # Read each image
+            frame = cv2.imread(img_path)
+            if frame is None:
+                print(f"[WARN] Could not read image: {img_path}")
+                continue
 
-        # 3. Run inference on the frame
-        results = model(frame)  # ultralytics >= v8.0.0 syntax
-        # results = model.predict(frame)  # older versions might need .predict()
+            # 5. Perform inference (prediction) on the frame
+            # By default, returns a list of Results
+            results_list = model.predict(frame)
+            # For a single image, there's only one Results object
+            results = results_list[0]
 
-        # 4. Draw bounding boxes using YOLO's built-in plotting
-        # results is a list; take the first batch
-        annotated_frame = results[0].plot()
+            # 6. Draw bounding boxes
+            drawn_frame = draw_boxes_on_image(frame.copy(), results)
 
-        # 5. Display the frame in a window
-        if display_window:
-            cv2.imshow("Real-Time Inference", annotated_frame)
+            # 7. Display the frame
+            cv2.imshow("YOLOv8 Real-Time Inference", drawn_frame)
 
-            # Press 'q' to exit
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                print("User requested exit.")
-                break
+            # 8. Wait for the desired frame interval
+            #    Press 'q' to quit the loop
+            if cv2.waitKey(delay_between_frames) & 0xFF == ord('q'):
+                print("[INFO] Quitting real-time display...")
+                cv2.destroyAllWindows()
+                return
 
-    # 6. Cleanup
-    cap.release()
-    cv2.destroyAllWindows()
-    print("Inference session ended.")
-
-
-def main():
-    """
-    Example usage:
-      - Replace 'dashcam.mp4' with your dash cam video file
-      - Replace 'runs/detect/kitti_experiment/weights/best.pt' with your trained weights
-    """
-    # If you have a Config with paths, e.g., Config.trained_weights, you can reference it directly.
-    # Here, we'll hardcode a path for demonstration.
-    video_path = "dashcam.mp4"  # or 0 for webcam
-    model_path = "runs/detect/kitti_experiment/weights/best.pt"
-
-    run_realtime_inference(video_source=video_path, model_weights=model_path)
+        # If you only want a single pass over the images (no repetition),
+        # you can uncomment the following lines:
+        # print("[INFO] Finished displaying all images once.")
+        # break
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="Real-time YOLOv8 inference on a sequence of images.")
+    parser.add_argument("--weights", type=str, required=True,
+                        help="Path to the trained YOLOv8 weights file (e.g., models/custom/my_model_final.pt).")
+    parser.add_argument("--images_folder", type=str, required=True,
+                        help="Path to the folder containing sequential images.")
+    parser.add_argument("--fps", type=int, default=30,
+                        help="Frames per second to simulate real-time display. Default is 30.")
+    args = parser.parse_args()
+
+    main(args.weights, args.images_folder, args.fps)

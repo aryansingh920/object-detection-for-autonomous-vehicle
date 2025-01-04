@@ -17,15 +17,6 @@
 # # python3.10 src/test_setup.py
 # python3.10 src/main.py
 
-# # python3.10 -m src.pipeline.train_model \
-# #     --dataset_type kitti \
-# #     --data_root /path/to/kitti/dataset \
-# #     --output_json kitti_annotations.json \
-# #     --dataset_yaml dataset.yaml \
-# #     --epochs 50 \
-# #     --batch_size 4 \
-# #     --img_size 640 \
-# #     --model_arch yolov8n.pt
 
 clear
 python3.10 src/main.py
