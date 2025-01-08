@@ -1,8 +1,13 @@
+import math
+import numpy as np
+from PIL import Image
 import argparse
 import os
 import cv2
 from ultralytics import YOLO
-
+from torchvision.transforms import Compose, Resize, ToTensor
+import torch
+# from src.config.config import Config
 CLASS_MAP = {
     0: "Car",
     1: "Pedestrian",
@@ -13,6 +18,23 @@ CLASS_MAP = {
     6: "Tram",
     7: "Misc",
 }
+
+
+def pad_to_32(image):
+    """Pads the image dimensions to be divisible by 32."""
+    height, width, _ = image.shape
+    pad_height = math.ceil(height / 32) * 32 - height
+    pad_width = math.ceil(width / 32) * 32 - width
+    padded_image = cv2.copyMakeBorder(
+        image,
+        0,
+        pad_height,
+        0,
+        pad_width,
+        cv2.BORDER_CONSTANT,
+        value=[0, 0, 0],
+    )
+    return padded_image, pad_height, pad_width
 
 
 def load_timestamps(timestamps_path):
@@ -36,6 +58,43 @@ def overlay_timestamp(image, timestamp, position=(5, 15), font_scale=0.5, color=
     )
     return image
 
+
+def load_midas_model():
+    model = torch.hub.load("intel-isl/MiDaS", "MiDaS")
+    model.eval()
+    transform = Compose([
+        Resize(384),  # MiDaS input resolution
+        ToTensor()
+    ])
+    print("[INFO] MiDaS model for depth estimation loaded.")
+    return model, transform
+
+
+def depth_estimation(midas_model, transform, image):
+    # Convert NumPy array (RGB) to PIL Image
+    padded_image, pad_height, pad_width = pad_to_32(image)
+    pil_image = Image.fromarray(padded_image)
+
+    # Apply transformations
+    input_batch = transform(pil_image).unsqueeze(0)
+
+    # Perform depth estimation
+    with torch.no_grad():
+        depth = midas_model(input_batch)
+
+    # Remove padding from depth map
+    depth = depth.squeeze().numpy()
+    depth = depth[:-pad_height, :-pad_width]
+
+    # Normalize depth map for visualization
+    depth_normalized = (depth - depth.min()) / (depth.max() - depth.min())
+    depth_normalized = (depth_normalized * 255).astype("uint8")
+
+    # Resize depth map to match original image size
+    depth_normalized = cv2.resize(
+        depth_normalized, (image.shape[1], image.shape[0]))
+
+    return depth_normalized
 
 def check_image_sequence(images_folder, timestamps, fps):
     image_files = sorted([
@@ -76,9 +135,11 @@ def check_image_sequence(images_folder, timestamps, fps):
                 return
 
 
-def realtime_inference(weights_path, images_folder, timestamps, fps):
+def realtime_inference(weights_path, images_folder, timestamps, fps, depth_est):
     model = YOLO(weights_path)
     print(f"[INFO] Loaded YOLOv8 model from: {weights_path}")
+
+    midas_model, transform = load_midas_model()  # Load MiDaS
 
     image_files = sorted([
         os.path.join(images_folder, f)
@@ -95,7 +156,7 @@ def realtime_inference(weights_path, images_folder, timestamps, fps):
             f"[WARN] Number of images ({len(image_files)}) does not match number of timestamps ({len(timestamps)}).")
 
     print(f"[INFO] Found {len(image_files)} images in folder: {images_folder}")
-    print("[INFO] Displaying real-time predictions (press 'q' to quit).")
+    print("[INFO] Displaying real-time predictions and depth estimation (press 'q' to quit).")
 
     delay_between_frames = int(1000 / fps)
 
@@ -106,9 +167,9 @@ def realtime_inference(weights_path, images_folder, timestamps, fps):
                 print(f"[WARN] Could not read image: {img_path}")
                 continue
 
+            # YOLOv8 Prediction
             results_list = model.predict(frame)
             results = results_list[0]
-
             frame_with_boxes = frame.copy()
 
             for box in results.boxes:
@@ -127,15 +188,33 @@ def realtime_inference(weights_path, images_folder, timestamps, fps):
                 frame_with_boxes = overlay_timestamp(
                     frame_with_boxes, timestamps[i])
 
-            combined_frame = cv2.vconcat([frame, frame_with_boxes])
+            # Depth Estimation using MiDaS
+            frame_rgb = cv2.cvtColor(frame_with_boxes, cv2.COLOR_BGR2RGB)
 
-            cv2.imshow("YOLOv8 Real-Time Inference", combined_frame)
+            if depth_est:
+                depth_map = depth_estimation(midas_model, transform, frame_rgb)
+
+                # Stack the frames for display
+                combined_frame = cv2.vconcat([frame, frame_with_boxes])
+                # Use colormap for better visualization
+                depth_colormap = cv2.applyColorMap(
+                    depth_map, cv2.COLORMAP_MAGMA)
+                final_display = cv2.vconcat([combined_frame, depth_colormap])
+                # final_display = cv2.vconcat([combined_frame])
+                cv2.imshow("YOLOv8 + Depth Estimation", final_display)
+
+            else:
+                # Stack the frames for display
+                combined_frame = cv2.vconcat([frame, frame_with_boxes])
+                final_display = cv2.vconcat([combined_frame])
+                cv2.imshow("YOLOv8", final_display)
+
+            # Display the combined frame
 
             if cv2.waitKey(delay_between_frames) & 0xFF == ord('q'):
                 print("[INFO] Quitting real-time display...")
                 cv2.destroyAllWindows()
                 return
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -150,18 +229,22 @@ if __name__ == "__main__":
                         help="Frames per second to simulate display. Default=30.")
     parser.add_argument("--check_sequence", action="store_true",
                         help="If set, only check the image sequence without running predictions.")
+    parser.add_argument("--depth_estimation", action="store_true", default=False,
+                        help="If set, perform depth estimation using MiDaS.")
 
     args = parser.parse_args()
 
+    # print("Depth", True if args.depth_estimation else False)
     timestamps = None
     if args.timestamps:
         timestamps = load_timestamps(args.timestamps)
 
     if args.check_sequence:
-        check_image_sequence(args.images_folder, timestamps, args.fps)
+        check_image_sequence(args.images_folder, timestamps,
+                             args.fps)
     else:
         if not args.weights:
             parser.error(
                 "--weights is required unless --check_sequence is specified.")
         realtime_inference(args.weights, args.images_folder,
-                           timestamps, args.fps)
+                           timestamps, args.fps, True if args.depth_estimation else False)

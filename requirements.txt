@@ -16,3 +16,4 @@ ultralytics
 python-magic
 pycocotools
 opencv-python
+trim
